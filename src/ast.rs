@@ -8,10 +8,14 @@ pub enum Expr {
         op: TokenType,
         right: Box<Expr>,
     },
+    Unary {
+        op: TokenType,
+        operand: Box<Expr>,
+    },
     Literal(Value),
     Variable(String),
     Assign {
-        name: String,
+        target: Box<Expr>,
         value: Box<Expr>,
     },
     Call {
@@ -26,6 +30,15 @@ pub enum Expr {
         name: String,
         fields: Vec<(String, Expr)>, // (field name, value) — positional uses ""
     },
+    Index {
+        object: Box<Expr>,
+        index: Box<Expr>,
+    },
+    SliceLiteral(Vec<Expr>),
+    Len(Box<Expr>),
+    Ref(Box<Expr>),        // &x
+    StrictRef(Box<Expr>),  // &strict x
+    Deref(Box<Expr>),      // explicit deref if needed later
 }
 
 #[derive(Debug, Clone)]

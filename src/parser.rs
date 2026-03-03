@@ -1,5 +1,6 @@
 use crate::lexer::{Token, TokenType};
 use crate::ast::{Expr, Stmt};
+use crate::value::Value;
 
 #[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
 pub enum Precedence {
@@ -39,7 +40,7 @@ impl Parser {
             TokenType::Fn => self.fn_declaration(),
             TokenType::Extern => self.extern_declaration(),
             TokenType::Struct => self.struct_declaration(),
-            TokenType::Identifier(_) if self.peek_next_is_ident() => self.var_declaration(),
+            TokenType::Identifier(_) if self.is_var_declaration() => self.var_declaration(),
             _ => self.statement(),
         }
     }
@@ -157,14 +158,18 @@ impl Parser {
                 Stmt::Block(self.block())
             },
             TokenType::Return => {
-                self.advance(); // consume 'return'
+                self.advance(); // consume 'return
+                if self.check(&TokenType::Semicolon) {
+                    self.advance();
+                    return Stmt::Return(Expr::Literal(Value::Null));
+                }
                 let value = self.expression();
                 self.consume(TokenType::Semicolon, "Expect ';' after return value.");
                 Stmt::Return(value)
             }
             _ => {
                 let expr = self.expression();
-                self.consume(TokenType::Semicolon, "Expect ';' after expression.");
+                self.consume(TokenType::Semicolon, "Expected ';' after expression.");
                 Stmt::Expression(expr)
             }
         }
@@ -236,6 +241,46 @@ impl Parser {
                 self.consume(TokenType::RParen, "Expect ')' after expression.");
                 expr
             }, 
+            TokenType::LBracket => {
+                let mut elements = Vec::new();
+                while !self.check(&TokenType::RBracket) && !self.is_at_end() {
+                    elements.push(self.expression());
+                    if !self.check(&TokenType::Comma) { break; }
+                    self.advance();
+                }
+                self.consume(TokenType::RBracket, "Expect ']' after slice literal.");
+                Expr::SliceLiteral(elements)
+            }
+            TokenType::Len => {
+                self.consume(TokenType::LParen, "Expect '(' after 'len'.");
+                let expr = self.expression();
+                self.consume(TokenType::RParen, "Expect ')' after len argument.");
+                Expr::Len(Box::new(expr))
+            }
+            TokenType::Amp => {
+                // &strict x or &x
+                if self.check(&TokenType::Strict) {
+                    self.advance(); // consume 'strict'
+                    let expr = self.parse_precedence(Precedence::Primary);
+                    Expr::StrictRef(Box::new(expr))
+                } else {
+                    let expr = self.parse_precedence(Precedence::Primary);
+                    Expr::Ref(Box::new(expr))
+                }
+            }
+            TokenType::Minus => {
+                let operand = self.parse_precedence(Precedence::Primary);
+                Expr::Unary {
+                    op: TokenType::Minus,
+                    operand: Box::new(operand),
+                }
+            }
+            TokenType::Not => {
+                let operand = self.parse_precedence(Precedence::Primary);
+                Expr::Unary { op: TokenType::Not, operand: Box::new(operand) }
+            }
+
+
             _ => panic!("[Line {}] Unexpected token in expression: {:?}", self.peek_line(), token),
         };
 
@@ -256,6 +301,11 @@ impl Parser {
                     let field = if let TokenType::Identifier(n) = self.consume_ident() { n }
                         else { panic!("Expected field name after '.'"); };
                     Expr::FieldAccess { object: Box::new(left), field }
+                },
+                TokenType::LBracket => {
+                    let index = self.expression();
+                    self.consume(TokenType::RBracket, "Expect ']' after index.");
+                    Expr::Index { object: Box::new(left), index: Box::new(index) }
                 }
                 _ => left,
             };
@@ -302,16 +352,9 @@ impl Parser {
     }
     
     fn assignment(&mut self, left: Expr) -> Expr {
-        let name = if let Expr::Variable(n) = left {
-            n
-        } else {
-            panic!("[Line {}] Invalid assignment target.", self.peek_line());
-        };
-
         let value = self.parse_precedence(Precedence::Assignment);
-
         Expr::Assign {
-            name,
+            target: Box::new(left),
             value: Box::new(value),
         }
     }
@@ -332,6 +375,7 @@ impl Parser {
             args,
         }
             
+
     }
 
     // --- Helpers ---
@@ -344,7 +388,8 @@ impl Parser {
             TokenType::Slash | TokenType::Star => Precedence::Factor, 
             TokenType::Plus | TokenType::Minus => Precedence::Term,
             TokenType::LParen => Precedence::Call,
-            TokenType::Dot => Precedence::Call, 
+            TokenType::Dot => Precedence::Call,
+            TokenType::LBracket => Precedence::Call,
             TokenType::Equal => Precedence::Assignment,
             _ => Precedence::None,
         }
@@ -396,9 +441,56 @@ impl Parser {
     }
 
     fn parse_type(&mut self) -> String {
-        match self.advance().clone() {
+        // [T] — dynamic slice
+        if self.check(&TokenType::LBracket) {
+            self.advance(); // consume '['
+            let inner = self.parse_type();
+            self.consume(TokenType::RBracket, "Expect ']' after slice type.");
+            return format!("[{}]", inner);
+        }
+
+        let base = match self.advance().clone() {
             TokenType::Identifier(n) => n,
-            other => format!("{:?}", other), // Int, Float, Bool, Str, Void
+            other => format!("{:?}", other),
+        };
+
+        // T[N] — fixed slice
+        if self.check(&TokenType::LBracket) {
+            self.advance(); // consume '['
+            let size = if let TokenType::Literal(Value::Int(n)) = self.advance().clone() {
+                n
+            } else {
+                panic!("Expected integer size in fixed slice type");
+            };
+            self.consume(TokenType::RBracket, "Expect ']' after slice size.");
+            return format!("{}[{}]", base, size);
+        }
+        
+         // T& or T strict&
+        if self.check(&TokenType::Amp) {
+            self.advance();
+            return format!("{}&", base);
+        }
+        if self.check(&TokenType::Strict) {
+            self.advance();
+            self.consume(TokenType::Amp, "Expect '&' after 'strict'.");
+            return format!("{} strict&", base);
+        }
+
+        base
+    }
+
+    fn is_var_declaration(&self) -> bool {
+        // look for: type [strict] [&] identifier
+        let mut offset = 1;
+        // skip 'strict' and '&' tokens
+        loop {
+            match self.tokens.get(self.current + offset).map(|t| &t.kind) {
+                Some(TokenType::Strict) | Some(TokenType::Amp) 
+                | Some(TokenType::LBracket) | Some(TokenType::RBracket) => offset += 1,
+                Some(TokenType::Identifier(_)) => return true,
+                _ => return false,
+            }
         }
     }
 

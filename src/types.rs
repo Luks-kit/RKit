@@ -9,7 +9,10 @@ pub enum LKitType {
     Bool,
     Str,
     Void,
-    Slice(Box<LKitType>),
+    Slice(Box<LKitType>, u64),
+    DynSlice(Box<LKitType>),
+    Ref(Box<LKitType>),        // T&
+    StrictRef(Box<LKitType>),  // T strict&
     Struct(String),
     Function {
         params: Vec<LKitType>,
@@ -18,6 +21,7 @@ pub enum LKitType {
 }
 
 impl LKitType {
+  
     pub fn from_str(s: &str) -> Option<LKitType> {
         match s {
             "Int"   => Some(LKitType::Int),
@@ -25,20 +29,49 @@ impl LKitType {
             "Bool"  => Some(LKitType::Bool),
             "Str"   => Some(LKitType::Str),
             "Void"  => Some(LKitType::Void),
-            other   => Some(LKitType::Struct(other.to_string()))
+            other if other.ends_with('&') => {
+                let inner = other.trim_end_matches('&').trim();
+                if inner.ends_with("strict") {
+                    let base = inner.trim_end_matches("strict").trim();
+                    LKitType::from_str(base).map(|t| LKitType::StrictRef(Box::new(t)))
+                } else {
+                    LKitType::from_str(inner).map(|t| LKitType::Ref(Box::new(t)))
+                }
+            }
+            other if other.starts_with('[') => {
+                // [T]
+                let inner = &other[1..other.len()-1];
+                LKitType::from_str(inner).map(|t| LKitType::DynSlice(Box::new(t)))
+            }
+            other => {
+                // T[N] or struct name
+                if let Some(bracket) = other.find('[') {
+                    let base = &other[..bracket];
+                    let size_str = &other[bracket+1..other.len()-1];
+                    if let (Some(base_ty), Ok(n)) 
+                    = (LKitType::from_str(base), size_str.parse::<u64>()) {
+                        return Some(LKitType::Slice(Box::new(base_ty), n));
+                    }
+                }
+                Some(LKitType::Struct(other.to_string()))
+            }
         }
     }
 
-    pub fn to_str(&self) -> &str {
+
+   pub fn to_str(&self) -> String {
         match self {
-            LKitType::Int     => "Int",
-            LKitType::Float   => "Float",
-            LKitType::Bool    => "Bool",
-            LKitType::Str     => "Str",
-            LKitType::Void    => "Void",
-            LKitType::Slice(_) => "Slice",
-            LKitType::Function { .. } => "Function",
-            LKitType::Struct(name) => name,
+            LKitType::Int     => "Int".to_string(),
+            LKitType::Float   => "Float".to_string(),
+            LKitType::Bool    => "Bool".to_string(),
+            LKitType::Str     => "Str".to_string(),
+            LKitType::Void    => "Void".to_string(),
+            LKitType::Slice(inner, n) => format!("{}[{}]", inner.to_str(), n),
+            LKitType::DynSlice(inner) => format!("[{}]", inner.to_str()),
+            LKitType::Struct(name) => name.clone(),
+            LKitType::Function { .. } => "Function".to_string(),
+            LKitType::Ref(inner)       => format!("{}&", inner.to_str()),
+            LKitType::StrictRef(inner) => format!("{} strict&", inner.to_str()),
         }
     }
     pub fn is_copy(&self, structs: &HashMap<String, StructDef>) -> bool {
@@ -46,7 +79,8 @@ impl LKitType {
             LKitType::Int | LKitType::Float | LKitType::Bool => true,
             LKitType::Str => false,
             LKitType::Void => true,
-            LKitType::Slice(_) => false,
+            LKitType::Slice(_, _) => false,
+            LKitType::DynSlice(_) => false,
             LKitType::Function { .. } => false,
             LKitType::Struct(name) => {
                 match structs.get(name) {
@@ -54,6 +88,8 @@ impl LKitType {
                     None => false,
                 }
             }
+            LKitType::Ref(_)       => true,  // shared read handle is copyable
+            LKitType::StrictRef(_) => false, // exclusive handle is not
         }
     }
 }
@@ -90,10 +126,13 @@ pub fn ty_size(ty: &LKitType, structs: &HashMap<String, StructDef>) -> usize {
         LKitType::Bool  => 1,
         LKitType::Str   => 8, // pointer
         LKitType::Void  => 0,
-        LKitType::Slice(_) => 16, // ptr + len
+        LKitType::Slice(_,size) => *size as usize,
+        LKitType::DynSlice(_) => 24, // ptr, len, 
         LKitType::Struct(name) => structs.get(name)
             .map(|d| d.size_bytes(structs))
             .unwrap_or(0),
         LKitType::Function { .. } => 8, // pointer
+        LKitType::Ref(_) | LKitType::StrictRef(_) => 8,
+
     }
 }

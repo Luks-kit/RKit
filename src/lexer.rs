@@ -3,9 +3,9 @@ use crate::value::Value;
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenType {
     // Keywords
-    Fn, Int, Str, Float, Bool, 
+    Fn, Int, Str, Float, Bool, Void,
     Return, If, Else, While,
-    Extern, Struct,
+    Extern, Struct, Len, Strict,
     // Literals & Identifiers
     Identifier(String),
     Literal(Value),
@@ -13,8 +13,9 @@ pub enum TokenType {
     // Operators & Punctuation
     Plus, Minus, Star, Slash, Not, Equal,
     EqualEqual, NotEqual,
+    Amp, Pipe, AmpAmp, PipePipe,
     Less, Greater, LessEqual, GreaterEqual,
-    LParen, RParen, LBrace, RBrace, 
+    LParen, RParen, LBrace, RBrace, LBracket, RBracket,
     Semicolon, Colon, Comma, Dot, Variadic,
     
     EOF,
@@ -81,6 +82,8 @@ impl<'a> Lexer<'a> {
             '*' => TokenType::Star,
             '/' => TokenType::Slash,            
             ':' => TokenType::Colon,
+            '[' => TokenType::LBracket,
+            ']' => TokenType::RBracket,
             '=' => {
                 if self.input.peek() == Some(&'=') {
                     self.input.next();
@@ -127,6 +130,22 @@ impl<'a> Lexer<'a> {
                     TokenType::Dot
                 }
             }
+            '&' => {
+                if self.input.peek() == Some(&'&') {
+                    self.input.next();
+                    TokenType::AmpAmp
+                } else {
+                    TokenType::Amp
+                }
+            }
+            '|' => {
+                if self.input.peek() == Some(&'|') {
+                    self.input.next();
+                    TokenType::PipePipe
+                } else {
+                    TokenType::Pipe
+                }
+            }
 
             '"' => self.read_string(),
             _ if c.is_ascii_digit() => self.read_number(c),
@@ -156,11 +175,14 @@ impl<'a> Lexer<'a> {
             "str" => TokenType::Str,
             "float" => TokenType::Float,
             "bool" => TokenType::Bool,
+            "void" => TokenType::Void,
             "struct" => TokenType::Struct,
+            "strict" => TokenType::Strict,
             "if" => TokenType::If,
             "else" => TokenType::Else,
             "while" => TokenType::While,
             "return" => TokenType::Return,
+            "len" => TokenType::Len,
             "true" => TokenType::Literal(Value::Bool(true)),
             "false" => TokenType::Literal(Value::Bool(false)),
             _ => TokenType::Identifier(ident),

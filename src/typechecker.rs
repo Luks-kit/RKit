@@ -22,6 +22,7 @@ pub struct TypeChecker {
     pub structs: HashMap<String, StructDef>,
     current_return_type: Option<LKitType>,
     pub errors: Vec<TypeError>,
+    borrow_state: HashMap<String, (usize, bool)>,
 }
 
 impl TypeChecker {
@@ -32,6 +33,7 @@ impl TypeChecker {
             structs: HashMap::new(),
             current_return_type: None,
             errors: Vec::new(),
+            borrow_state: HashMap::new(),
         }
     }
 
@@ -131,7 +133,7 @@ impl TypeChecker {
                 }
             }
 
-            Stmt::Function { name, params, return_type, body } => {
+            Stmt::Function { name: _, params, return_type, body } => {
                 let ret = LKitType::from_str(return_type).unwrap_or(LKitType::Void);
                 self.current_return_type = Some(ret.clone());
                 self.push_scope();
@@ -151,6 +153,15 @@ impl TypeChecker {
 
             Stmt::Return(expr) => {
                 let actual = self.check_expr(expr);
+                 match &actual {
+                    Some(LKitType::Ref(_)) | Some(LKitType::StrictRef(_)) => {
+                        self.errors.push(TypeError::new(
+                            "Cannot return a handle — it would outlive its referent"
+                        ));
+                    }
+                    _ => {}
+                }
+                
                 match (&self.current_return_type, actual) {
                     (Some(expected), Some(actual)) if actual != *expected => {
                         self.errors.push(TypeError::new(format!(
@@ -217,6 +228,7 @@ impl TypeChecker {
                 Value::Str(_)   => LKitType::Str,
                 Value::Null     => LKitType::Void,
                 Value::Function(_) => return None,
+                
             }),
 
             Expr::Variable(name) => {
@@ -231,25 +243,119 @@ impl TypeChecker {
                 }
             }
 
-            Expr::Assign { name, value } => {
-                let expected = match self.lookup(name) {
-                    Some(ty) => ty.clone(),
-                    None => {
-                        self.errors.push(TypeError::new(
-                            format!("Undefined variable '{}'", name)
-                        ));
+            Expr::Assign { target, value } => {
+                // 1. Determine the type of the assignment target
+                let target_ty = match target.as_ref() {
+                    Expr::Variable(name) => {
+                        match self.lookup(name) {
+                            Some(LKitType::StrictRef(inner)) => *inner.clone(),
+                            Some(LKitType::Ref(_)) => {
+                                self.errors.push(TypeError::new(
+                                    format!("Cannot assign through shared handle '{}'", name)
+                                ));
+                                return None;
+                            }
+                            Some(t) => t.clone(),
+                            None => {
+                                self.errors.push(TypeError::new(
+                                    format!("Undefined variable '{}'", name)
+                                ));
+                                return None;
+                            }
+                        }
+                    }
+                    Expr::FieldAccess { object, field } => {
+                        let obj_ty = self.check_expr(object)?;
+                        // unwrap handle, but reject shared handles
+                        let base_ty = match obj_ty {
+                            LKitType::StrictRef(inner) => *inner,
+                            LKitType::Ref(_) => {
+                                self.errors.push(TypeError::new(
+                                    "Cannot assign to field through shared handle"
+                                ));
+                                return None;
+                            }
+                            other => other,
+                        };
+                        match base_ty {
+                            LKitType::Struct(name) => {
+                                match self.structs.get(&name) {
+                                    Some(def) => match def.field_type(field) {
+                                        Some(ty) => ty.clone(),
+                                        None => {
+                                            self.errors.push(TypeError::new(
+                                                format!("No field '{}' on struct '{}'", field, name)
+                                            ));
+                                            return None;
+                                        }
+                                    },
+                                    None => {
+                                        self.errors.push(TypeError::new(
+                                            format!("Unknown struct '{}'", name)
+                                        ));
+                                        return None;
+                                    }
+                                }
+                            }
+                            other => {
+                                self.errors.push(TypeError::new(
+                                    format!("Cannot assign to field on non-struct type {:?}", other)
+                                ));
+                                return None;
+                            }
+                        }
+                    }
+                    Expr::Index { object, index } => {
+                        match self.check_expr(object)? {
+                            LKitType::Slice(inner, _) |
+                            LKitType::DynSlice(inner) => *inner,
+                            other => {
+                                self.errors.push(TypeError::new(
+                                    format!("Cannot index-assign into non-slice type {:?}", other)
+                                ));
+                                return None;
+                            }
+                        }
+                    }
+                    _ => {
+                        self.errors.push(TypeError::new("Invalid assignment target"));
                         return None;
                     }
                 };
+
+                // 2. Type-check the value being assigned and compare to target
                 match self.check_expr(value) {
-                    Some(actual) if actual != expected => {
+                    Some(val_ty) if val_ty != target_ty => {
                         self.errors.push(TypeError::new(format!(
-                            "Cannot assign {:?} to variable '{}' of type {:?}",
-                            actual, name, expected
+                            "Cannot assign {:?} to {:?}", val_ty, target_ty
                         )));
                         None
                     }
                     other => other,
+                }
+            }
+            
+            Expr::Unary { op, operand } => {        
+                match op { 
+                TokenType::Not => match self.check_expr(operand)? {
+                    LKitType::Bool => Some(LKitType::Bool),
+                    other => {
+                        self.errors.push(TypeError::new(format!("'!' on non-bool type {:?}", other)));
+                        None
+                    }
+                },                
+    
+                TokenType::Minus => match self.check_expr(operand)? {
+                        LKitType::Int   => Some(LKitType::Int),
+                        LKitType::Float => Some(LKitType::Float),
+                        other => {
+                            self.errors.push(TypeError::new(
+                                format!("Unary minus on non-numeric type {:?}", other)
+                            ));
+                            None
+                        }
+                    }
+                    _ => { self.errors.push(TypeError::new(format!("Bad unary application: {:?} {:?}", op, operand))); None }
                 }
             }
 
@@ -306,8 +412,14 @@ impl TypeChecker {
                 }
             }
 
-            Expr::FieldAccess { object, field } => {
-                match self.check_expr(object)? {
+           Expr::FieldAccess { object, field } => {
+                let obj_ty = self.check_expr(object)?;
+                // unwrap handle
+                let base_ty = match obj_ty {
+                    LKitType::Ref(inner) | LKitType::StrictRef(inner) => *inner,
+                    other => other,
+                };
+                match base_ty {
                     LKitType::Struct(name) => {
                         match self.structs.get(&name) {
                             Some(def) => match def.field_type(field) {
@@ -334,7 +446,7 @@ impl TypeChecker {
                         None
                     }
                 }
-            }
+            } 
 
             Expr::StructInit { name, fields } => {
                 let def = match self.structs.get(name).cloned() {
@@ -366,6 +478,122 @@ impl TypeChecker {
                     }
                 }
                 Some(LKitType::Struct(name.clone()))
+            }
+
+            Expr::SliceLiteral(elements) => {
+                if elements.is_empty() {
+                    self.errors.push(TypeError::new("Cannot infer type of empty slice literal"));
+                    return None;
+                }
+                let first = self.check_expr(&elements[0])?;
+                for el in &elements[1..] {
+                    match self.check_expr(el) {
+                        Some(t) if t != first => {
+                            self.errors.push(TypeError::new(format!(
+                                "Slice literal has mixed types: {:?} and {:?}", first, t
+                            )));
+                            return None;
+                        }
+                        _ => {}
+                    }
+                }
+                Some(LKitType::Slice(Box::new(first), elements.len() as u64))
+            }
+
+            Expr::Index { object, index } => {
+                let idx_ty = self.check_expr(index)?;
+                if idx_ty != LKitType::Int {
+                    self.errors.push(TypeError::new("Slice index must be Int"));
+                    return None;
+                }
+
+                if let Expr::Literal(Value::Int(n)) = index.as_ref() {
+                    if let Some(LKitType::Slice(inner, size)) = self.check_expr(object) {
+                        if *n < 0 || *n as u64 >= size {
+                            self.errors.push(TypeError::new(format!(
+                                "Index {} out of bounds for slice of size {}", n, size
+                            )));
+                            return None;
+                        }
+                        return Some(*inner);
+                    }
+                }
+
+                match self.check_expr(object)? {
+                    LKitType::Slice(inner, _) => Some(*inner),
+                    LKitType::DynSlice(inner) => Some(*inner),
+                    other => {
+                        self.errors.push(TypeError::new(format!(
+                            "Cannot index into non-slice type {:?}", other
+                        )));
+                        None
+                    }
+                }
+            }
+
+            Expr::Len(expr) => {
+                match self.check_expr(expr)? {
+                    LKitType::Slice(_, _) | LKitType::DynSlice(_) => Some(LKitType::Int),
+                    other => {
+                        self.errors.push(TypeError::new(format!(
+                            "len() requires a slice, got {:?}", other
+                        )));
+                        None
+                    }
+                }
+            }
+            Expr::Ref(inner) => {
+                match inner.as_ref() {
+                    Expr::Variable(name) => {
+                        let ty = self.lookup(name).ok_or_else(|| 
+                                TypeError::new(format!("Undefined variable '{}'", name)))
+                            .cloned();
+                        match ty {
+                            Ok(t) => {
+                                if let Err(e) = self.borrow_shared(name) {
+                                    self.errors.push(e);
+                                    None
+                                } else {
+                                    Some(LKitType::Ref(Box::new(t)))
+                                }
+                            }
+                            Err(e) => { self.errors.push(e); None }
+                        }
+                    }
+                    _ => {
+                        self.errors.push(TypeError::new("Can only take handle of a variable"));
+                        None
+                    }
+                }
+            }
+
+            Expr::StrictRef(inner) => {
+                match inner.as_ref() {
+                    Expr::Variable(name) => {
+                        let ty = self.lookup(name)
+                            .ok_or_else(|| TypeError::new(format!("Undefined variable '{}'", name)))
+                            .cloned();
+                        match ty {
+                            Ok(t) => {
+                                if let Err(e) = self.borrow_exclusive(name) {
+                                    self.errors.push(e);
+                                    None
+                                } else {
+                                    Some(LKitType::StrictRef(Box::new(t)))
+                                }
+                            }
+                            Err(e) => { self.errors.push(e); None }
+                        }
+                    }
+                    _ => {
+                        self.errors.push(TypeError::new("Can only take strict handle of a variable"));
+                        None
+                    }
+                }
+            }
+
+            Expr::Deref(inner) => {
+               Some(self.check_expr(inner)?)  
             }
         }
     }
@@ -427,4 +655,34 @@ impl TypeChecker {
             other => other,
         }
     }
+
+    // helper methods:
+    fn borrow_shared(&mut self, name: &str) -> Result<(), TypeError> {
+        let state = self.borrow_state.entry(name.to_string()).or_insert((0, false));
+        if state.1 {
+            Err(TypeError::new(format!(
+                "Cannot create shared handle to '{}' — exclusive handle exists", name
+            )))
+        } else {
+            state.0 += 1;
+            Ok(())
+        }
+    }
+
+    fn borrow_exclusive(&mut self, name: &str) -> Result<(), TypeError> {
+        let state = self.borrow_state.entry(name.to_string()).or_insert((0, false));
+        if state.1 {
+            Err(TypeError::new(format!(
+                "Cannot create exclusive handle to '{}' — exclusive handle already exists", name
+            )))
+        } else if state.0 > 0 {
+            Err(TypeError::new(format!(
+                "Cannot create exclusive handle to '{}' — shared handles exist", name
+            )))
+        } else {
+            state.1 = true;
+            Ok(())
+        }
+    }
+
 }
