@@ -6,7 +6,7 @@ mod compiler;
 mod types;
 mod typechecker;
 
-use lexer::Lexer;
+use lexer::{Lexer, Token};
 use lexer::TokenType;
 use parser::Parser;
 use typechecker::TypeChecker;
@@ -17,12 +17,13 @@ use inkwell::targets::{
 };
 use inkwell::OptimizationLevel;
 
-fn lex(source: &str) -> Vec<TokenType> {
+
+fn lex(source: &str) -> Vec<Token> {
     let mut lexer = Lexer::new(source);
     let mut tokens = Vec::new();
     loop {
         let tok = lexer.next_token();
-        let is_eof = tok == TokenType::EOF;
+        let is_eof = tok.kind == TokenType::EOF;
         tokens.push(tok);
         if is_eof { break; }
     }

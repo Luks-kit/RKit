@@ -23,20 +23,35 @@ pub enum TokenType {
 use std::iter::Peekable;
 use std::str::Chars;
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct Token {
+    pub kind: TokenType,
+    pub line: usize,
+}
+
+impl Token {
+    pub fn new(kind: TokenType, line: usize) -> Self {
+        Self { kind, line }
+    }
+}
+
 pub struct Lexer<'a> {
     input: Peekable<Chars<'a>>,
+    pub line: usize,
 }
 
 impl<'a> Lexer<'a> {
     pub fn new(input: &'a str) -> Self {
         Self {
             input: input.chars().peekable(),
+            line: 1,
         }
     }
 
     // Helper to consume whitespace
     fn skip_whitespace(&mut self) {
         while let Some(&c) = self.input.peek() {
+            if c == '\n' { self.line += 1; }
             if c.is_whitespace() {
                 self.input.next();
             } else {
@@ -45,15 +60,16 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    pub fn next_token(&mut self) -> TokenType {
+    pub fn next_token(&mut self) -> Token {
         self.skip_whitespace();
 
         let c = match self.input.next() {
             Some(c) => c,
-            None => return TokenType::EOF,
+            None => return Token::new(TokenType::EOF, self.line),
         };
 
-        match c {
+        let kind = match c {
+            '\n' => { self.line += 1; return self.next_token(); }
             '(' => TokenType::LParen,
             ')' => TokenType::RParen,
             '{' => TokenType::LBrace,
@@ -116,7 +132,8 @@ impl<'a> Lexer<'a> {
             _ if c.is_ascii_digit() => self.read_number(c),
             _ if c.is_alphabetic() => self.read_identifier(c),
             _ => TokenType::EOF, // Should probably be an Error type later
-        }
+        };
+        Token::new(kind, self.line)
     }
 }
 

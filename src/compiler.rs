@@ -409,7 +409,19 @@ impl<'ctx> Compiler<'ctx> {
             "Float" => self.context.f64_type().into(),
             "Bool" => self.context.bool_type().into(),
             "Str" => self.context.ptr_type(AddressSpace::default()).into(),
-            _ => self.context.i64_type().into(),
+            other   => {
+                // try to resolve as a struct
+                if let Some(def) = self.struct_defs.get(other) {
+                    let field_types: Vec<BasicTypeEnum> = def.fields.iter()
+                        .map(|(_, t)| self.type_str_to_llvm(t.to_str()))
+                        .collect();
+                    self.context.struct_type(&field_types, false).into()
+                } else {
+                    // fallback — should never hit if type checker did its job
+                    eprintln!("WARNING: unknown type '{}', defaulting to i64", other);
+                    self.context.i64_type().into()
+                }
+            }
         }
     }
     // Helper to get LLVM struct type:

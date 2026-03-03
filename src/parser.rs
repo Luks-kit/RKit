@@ -1,4 +1,4 @@
-use crate::lexer::TokenType;
+use crate::lexer::{Token, TokenType};
 use crate::ast::{Expr, Stmt};
 
 #[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
@@ -13,12 +13,12 @@ pub enum Precedence {
 }
 
 pub struct Parser {
-    tokens: Vec<TokenType>,
+    tokens: Vec<Token>,
     current: usize,
 }
 
 impl Parser {
-    pub fn new(tokens: Vec<TokenType>) -> Self {
+    pub fn new(tokens: Vec<Token>) -> Self {
         Self { tokens, current: 0 }
     }
 
@@ -39,17 +39,16 @@ impl Parser {
             TokenType::Fn => self.fn_declaration(),
             TokenType::Extern => self.extern_declaration(),
             TokenType::Struct => self.struct_declaration(),
+            TokenType::Identifier(_) if self.peek_next_is_ident() => self.var_declaration(),
             _ => self.statement(),
         }
     }
 
     fn var_declaration(&mut self) -> Stmt {
-        let type_tok = self.advance().clone();
-        let value_type = format!("{:?}", type_tok);
-        
+        let value_type = self.parse_type();
         let name = if 
             let TokenType::Identifier(n) = self.consume_ident() 
-            { n } else { panic!("Expect variable name"); };
+            { n } else { panic!("[line {}] Expect variable name", self.peek_line()); };
 
         self.consume(TokenType::Equal, "Expect '=' after variable name.");
         let initializer = self.expression();
@@ -61,10 +60,10 @@ impl Parser {
     fn fn_declaration(&mut self) -> Stmt {
         self.advance(); // consume 'fn'
         // Simplified: assuming 'fn type name(...)'
-        let ret_type = format!("{:?}", self.advance());
+        let ret_type = self.parse_type();
         let name = if 
             let TokenType::Identifier(n) = self.consume_ident() { n } 
-            else { panic!("Expected name"); };
+            else { panic!("[line {}] Expected name", self.peek_line()); };
         
         self.consume(TokenType::LParen, "Expect '(' after function name.");
         
@@ -72,7 +71,7 @@ impl Parser {
         if !self.check(&TokenType::RParen) {
             loop {
                 // Parse type (int/str)
-                let p_type = format!("{:?}", self.advance());
+                let p_type = self.parse_type();
                 
                 // Parse name
                 let p_name = if let TokenType::Identifier(n) = self.consume_ident() {
@@ -100,7 +99,7 @@ impl Parser {
         self.advance(); // consume 'extern'
         self.consume(TokenType::Fn, "Expect 'fn' after 'extern'.");
         
-        let ret_type = format!("{:?}", self.advance()); // return type
+        let ret_type = self.parse_type(); // return type
         let name = if let TokenType::Identifier(n) = self.consume_ident() { n }
             else { panic!("Expected function name"); };
         
@@ -139,9 +138,9 @@ impl Parser {
         
         let mut fields = Vec::new();
         while !self.check(&TokenType::RBrace) && !self.is_at_end() {
-            let field_type = format!("{:?}", self.advance());
+            let field_type = self.parse_type();
             let field_name = if let TokenType::Identifier(n) = self.consume_ident() { n }
-                else { panic!("Expected field name"); };
+            else { panic!("Expected field name"); };
             self.consume(TokenType::Semicolon, "Expect ';' after field.");
             fields.push((field_name, field_type));
         }
@@ -237,7 +236,7 @@ impl Parser {
                 self.consume(TokenType::RParen, "Expect ')' after expression.");
                 expr
             }, 
-            _ => panic!("Unexpected token in expression: {:?}", token),
+            _ => panic!("[Line {}] Unexpected token in expression: {:?}", self.peek_line(), token),
         };
 
         
@@ -287,7 +286,6 @@ impl Parser {
             if !self.check(&TokenType::Comma) { break; }
             self.advance();
         }
-          eprintln!("DEBUG struct_init: about to consume RBrace, next token is {:?}", self.peek());
         self.consume(TokenType::RBrace, "Expect '}' after struct init.");
         Expr::StructInit { name, fields }
     }
@@ -307,7 +305,7 @@ impl Parser {
         let name = if let Expr::Variable(n) = left {
             n
         } else {
-            panic!("Invalid assignment target.");
+            panic!("[Line {}] Invalid assignment target.", self.peek_line());
         };
 
         let value = self.parse_precedence(Precedence::Assignment);
@@ -353,25 +351,27 @@ impl Parser {
     }
 
     fn peek(&self) -> &TokenType {
-        &self.tokens[self.current]
+        &self.tokens[self.current].kind
+    }
+
+    fn peek_line(&self) -> usize {
+        self.tokens[self.current].line
     }
 
     fn advance(&mut self) -> &TokenType {
         if !self.is_at_end() { self.current += 1; }
-        &self.tokens[self.current - 1]
+        &self.tokens[self.current - 1].kind
     }
 
     fn check(&self, kind: &TokenType) -> bool {
         self.peek() == kind
     }
 
-    fn is_at_end(&self) -> bool {
-        matches!(self.peek(), TokenType::EOF)
-    }
-
     fn consume(&mut self, kind: TokenType, msg: &str) {
         if self.check(&kind) { self.advance(); }
-        else { panic!("{}", msg); }
+        else { 
+            panic!("[line {}] {}", self.peek_line(), msg);
+        }
     }
 
     fn consume_ident(&mut self) -> TokenType {
@@ -379,8 +379,29 @@ impl Parser {
         if let TokenType::Identifier(_) = t {
             self.advance();
             t
-        } else { panic!("Expected identifier"); }
+        } else {
+            panic!("[line {}] Expected identifier, got {:?}", self.peek_line(), t);
+        }
     }
+
+
+    fn is_at_end(&self) -> bool {
+        matches!(self.peek(), TokenType::EOF)
+    }
+
+       
+    fn peek_next_is_ident(&self) -> bool {
+        matches!(self.tokens.get(self.current + 1).map(|t| &t.kind), 
+            Some(TokenType::Identifier(_)))
+    }
+
+    fn parse_type(&mut self) -> String {
+        match self.advance().clone() {
+            TokenType::Identifier(n) => n,
+            other => format!("{:?}", other), // Int, Float, Bool, Str, Void
+        }
+    }
+
 }
 
 fn next_precedence(p: Precedence) -> Precedence {
