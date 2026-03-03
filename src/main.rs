@@ -3,10 +3,13 @@ mod ast;
 mod value;
 mod parser;
 mod compiler;
+mod types;
+mod typechecker;
 
 use lexer::Lexer;
 use lexer::TokenType;
 use parser::Parser;
+use typechecker::TypeChecker;
 use compiler::Compiler;
 use inkwell::context::Context;
 use inkwell::targets::{
@@ -53,7 +56,19 @@ fn main() {
 
     // Parse
     let mut parser = Parser::new(tokens);
-    let stmts = parser.parse();
+    let stmts_unchecked = parser.parse();
+    
+    // Typecheck
+    let mut checker = TypeChecker::new();
+    checker.check(&stmts_unchecked);
+    if !checker.errors.is_empty() {
+        for err in &checker.errors {
+            eprintln!("Type error: {}", err.message);
+        }
+        std::process::exit(1);
+    }
+    
+    let stmts = checker.transform(stmts_unchecked);
 
     // Compile
     let context = Context::create();

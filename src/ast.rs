@@ -18,6 +18,14 @@ pub enum Expr {
         callee: Box<Expr>,
         args: Vec<Expr>,
     },
+    FieldAccess {
+        object: Box<Expr>,
+        field: String,
+    },
+    StructInit {
+        name: String,
+        fields: Vec<(String, Expr)>, // (field name, value) — positional uses ""
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -26,6 +34,10 @@ pub enum Stmt {
     VarDecl {
         name: String,
         value_type: String,
+        initializer: Expr,
+    },
+    LetDecl {
+        name: String,
         initializer: Expr,
     },
     Block(Vec<Stmt>),
@@ -50,5 +62,9 @@ pub enum Stmt {
         params: Vec<(String, String)>, // (name, type)
         return_type: String,
         variadic: bool,
-    }
+    },
+    Struct{
+        name: String,
+        fields: Vec<(String, String)>,
+    },
 }

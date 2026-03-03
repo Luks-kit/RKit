@@ -5,7 +5,7 @@ pub enum TokenType {
     // Keywords
     Fn, Int, Str, Float, Bool, 
     Return, If, Else, While,
-    Extern,
+    Extern, Struct,
     // Literals & Identifiers
     Identifier(String),
     Literal(Value),
@@ -15,7 +15,7 @@ pub enum TokenType {
     EqualEqual, NotEqual,
     Less, Greater, LessEqual, GreaterEqual,
     LParen, RParen, LBrace, RBrace, 
-    Semicolon, Comma, Dot, Variadic,
+    Semicolon, Colon, Comma, Dot, Variadic,
     
     EOF,
 }
@@ -64,6 +64,7 @@ impl<'a> Lexer<'a> {
             '-' => TokenType::Minus,
             '*' => TokenType::Star,
             '/' => TokenType::Slash,            
+            ':' => TokenType::Colon,
             '=' => {
                 if self.input.peek() == Some(&'=') {
                     self.input.next();
@@ -107,7 +108,7 @@ impl<'a> Lexer<'a> {
                         panic!("Unexpected '..' — did you mean '...'?");
                     }
                 } else {
-                    panic!("Unexpected '.'");
+                    TokenType::Dot
                 }
             }
 
@@ -138,6 +139,7 @@ impl<'a> Lexer<'a> {
             "str" => TokenType::Str,
             "float" => TokenType::Float,
             "bool" => TokenType::Bool,
+            "struct" => TokenType::Struct,
             "if" => TokenType::If,
             "else" => TokenType::Else,
             "while" => TokenType::While,

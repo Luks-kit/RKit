@@ -10,6 +10,9 @@ use std::collections::HashMap;
 use crate::value::Value;
 use crate::lexer::TokenType;
 use crate::ast::{Expr, Stmt};
+use crate::types::StructDef;
+use crate::types::LKitType;
+
 
 pub struct VarSlot<'ctx> {
     pub ptr: PointerValue<'ctx>,
@@ -20,7 +23,9 @@ pub struct Compiler<'ctx> {
     pub context: &'ctx Context,
     pub module: Module<'ctx>,
     pub builder: Builder<'ctx>,
+    pub struct_defs: HashMap<String, StructDef>,
     pub variables: HashMap<String, VarSlot<'ctx>>,
+
 }
 
 impl<'ctx> Compiler<'ctx> {
@@ -28,7 +33,8 @@ impl<'ctx> Compiler<'ctx> {
         let module = context.create_module(module_name);
         let builder = context.create_builder();
         let variables: HashMap<String, VarSlot<'ctx>> = HashMap::new();
-        Compiler { context, module, builder, variables }
+        let struct_defs: HashMap<String, StructDef> = HashMap::new();
+        Compiler { context, module, builder, struct_defs, variables }
     } 
 
     pub fn compile_expression(&self, expr: Expr) -> Result<BasicValueEnum<'ctx>, String> {
@@ -154,6 +160,68 @@ impl<'ctx> Compiler<'ctx> {
                     ValueKind::Instruction(_) => Ok(self.context.i64_type().const_int(0, false).as_basic_value_enum()),
                 }   
             },
+
+            Expr::StructInit { name, fields } => {
+                let struct_ty = self.get_struct_type(&name)?;
+                let alloca = self.builder.build_alloca(struct_ty, &name)
+                    .map_err(|e| e.to_string())?;
+                let def = self.struct_defs.get(&name).cloned()
+                    .ok_or_else(|| format!("Unknown struct '{}'", name))?;
+                for (i, (_, val_expr)) in fields.iter().enumerate() {
+                    let val = self.compile_expression(val_expr.clone())?;
+                    let ptr = self.builder.build_struct_gep(struct_ty, alloca, i as u32, "field")
+                        .map_err(|e| e.to_string())?;
+                    self.builder.build_store(ptr, val)
+                        .map_err(|e| e.to_string())?;
+                }
+                Ok(self.builder.build_load(struct_ty, alloca, &name)
+                    .map_err(|e| e.to_string())?)
+            }
+
+            Expr::FieldAccess { object, field } => {
+                // We need the struct name from the type — get it via the variable
+                let (struct_name, struct_val) = match *object {
+                    Expr::Variable(ref vname) => {
+                        let slot = self.variables.get(vname)
+                            .ok_or_else(|| format!("Undefined variable '{}'", vname))?;
+                        let struct_name = match slot.ty {
+                            BasicTypeEnum::StructType(_) => {
+                                // find name by matching
+                                self.struct_defs.iter()
+                                    .find(|(_, def)| {
+                                        let ft: Vec<BasicTypeEnum> = def.fields.iter()
+                                            .map(|(_, t)| self.type_str_to_llvm(t.to_str()))
+                                            .collect();
+                                        self.context.struct_type(&ft, false) == slot.ty.into_struct_type()
+                                    })
+                                    .map(|(n, _)| n.clone())
+                                    .ok_or_else(|| "Cannot resolve struct type".to_string())?
+                            }
+                            _ => return Err("Field access on non-struct".into()),
+                        };
+                        let val = self.builder.build_load(slot.ty, slot.ptr, vname)
+                            .map_err(|e| e.to_string())?;
+                        (struct_name, val)
+                    }
+                    other => return Err(format!("Complex field access not yet supported")),
+                };
+                let def = self.struct_defs.get(&struct_name).cloned()
+                    .ok_or_else(|| format!("Unknown struct '{}'", struct_name))?;
+                let idx = def.field_index(&field)
+                    .ok_or_else(|| format!("No field '{}' on '{}'", field, struct_name))? as u32;
+                let struct_ty = self.get_struct_type(&struct_name)?;
+
+                // alloca, store, gep, load
+                let alloca = self.builder.build_alloca(struct_ty, "tmp")
+                    .map_err(|e| e.to_string())?;
+                self.builder.build_store(alloca, struct_val)
+                    .map_err(|e| e.to_string())?;
+                let field_ptr = self.builder.build_struct_gep(struct_ty, alloca, idx, &field)
+                    .map_err(|e| e.to_string())?;
+                let field_ty = self.type_str_to_llvm(def.fields[idx as usize].1.to_str());
+                self.builder.build_load(field_ty, field_ptr, &field)
+                    .map_err(|e| e.to_string())
+            }
         }
     }
     
@@ -312,6 +380,15 @@ impl<'ctx> Compiler<'ctx> {
                 self.module.add_function(&name, fn_type, Some(inkwell::module::Linkage::External));
                 Ok(())
             }
+            Stmt::Struct { name, fields } => {
+                let typed_fields: Vec<(String, LKitType)> = fields.iter()
+                    .filter_map(|(n, t)| LKitType::from_str(t).map(|ty| (n.clone(), ty)))
+                    .collect();
+                self.struct_defs.insert(name.clone(), StructDef { name, fields: typed_fields });
+                Ok(())
+            }
+
+            Stmt::LetDecl { .. } => unreachable!("LetDecl should be folded by type checker"),
         }
     }
     
@@ -335,4 +412,14 @@ impl<'ctx> Compiler<'ctx> {
             _ => self.context.i64_type().into(),
         }
     }
+    // Helper to get LLVM struct type:
+    fn get_struct_type(&self, name: &str) -> Result<inkwell::types::StructType<'ctx>, String> {
+        let def = self.struct_defs.get(name)
+            .ok_or_else(|| format!("Unknown struct '{}'", name))?;
+        let field_types: Vec<BasicTypeEnum> = def.fields.iter()
+            .map(|(_, ty)| self.type_str_to_llvm(ty.to_str()))
+            .collect();
+        Ok(self.context.struct_type(&field_types, false))
+    }
+
 }

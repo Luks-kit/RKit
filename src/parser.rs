@@ -33,12 +33,12 @@ impl Parser {
     // --- Declarations & Statements ---
 
     fn declaration(&mut self) -> Stmt {
-        // Simple heuristic: if we see 'int' or 'str', it's a VarDecl
         match self.peek() {
             TokenType::Int | TokenType::Str 
             | TokenType::Bool | TokenType::Float => self.var_declaration(),
             TokenType::Fn => self.fn_declaration(),
             TokenType::Extern => self.extern_declaration(),
+            TokenType::Struct => self.struct_declaration(),
             _ => self.statement(),
         }
     }
@@ -131,6 +131,24 @@ impl Parser {
         Stmt::Extern { name, params, return_type: ret_type, variadic }
     }
 
+    fn struct_declaration(&mut self) -> Stmt {
+        self.advance(); // consume 'struct'
+        let name = if let TokenType::Identifier(n) = self.consume_ident() { n }
+            else { panic!("Expected struct name"); };
+        self.consume(TokenType::LBrace, "Expect '{' after struct name.");
+        
+        let mut fields = Vec::new();
+        while !self.check(&TokenType::RBrace) && !self.is_at_end() {
+            let field_type = format!("{:?}", self.advance());
+            let field_name = if let TokenType::Identifier(n) = self.consume_ident() { n }
+                else { panic!("Expected field name"); };
+            self.consume(TokenType::Semicolon, "Expect ';' after field.");
+            fields.push((field_name, field_type));
+        }
+        self.consume(TokenType::RBrace, "Expect '}' after struct body.");
+        Stmt::Struct { name, fields }
+    }
+
     fn statement(&mut self) -> Stmt {
         match self.peek() {
             TokenType::If => self.if_statement(),
@@ -197,6 +215,7 @@ impl Parser {
     
 
     // --- Pratt Expression Parsing ---
+        
 
     pub fn expression(&mut self) -> Expr {
         self.parse_precedence(Precedence::Assignment)
@@ -208,7 +227,11 @@ impl Parser {
         // Prefix rules
         let mut left = match token {
             TokenType::Literal(v) => Expr::Literal(v),
-            TokenType::Identifier(n) => Expr::Variable(n),
+            TokenType::Identifier(n) => {
+                if self.check(&TokenType::LBrace) 
+                { self.struct_init(n) } 
+                else { Expr::Variable(n) }
+            }            
             TokenType::LParen => {
                 let expr = self.expression();
                 self.consume(TokenType::RParen, "Expect ')' after expression.");
@@ -230,11 +253,43 @@ impl Parser {
                 => self.binary(left, op_token),
                 TokenType::Equal => self.assignment(left),
                 TokenType::LParen => self.call(left),
+                TokenType::Dot => {
+                    let field = if let TokenType::Identifier(n) = self.consume_ident() { n }
+                        else { panic!("Expected field name after '.'"); };
+                    Expr::FieldAccess { object: Box::new(left), field }
+                }
                 _ => left,
             };
         }
 
         left
+    }
+
+    fn struct_init(&mut self, name: String) -> Expr {
+        self.advance(); // consume '{'
+        let mut fields = Vec::new();
+        while !self.check(&TokenType::RBrace) && !self.is_at_end() {
+            // try named: ident ':'
+            let (field_name, value) = if let TokenType::Identifier(n) = self.peek().clone() {
+                self.advance();
+                if self.check(&TokenType::Colon) {
+                    self.advance(); // consume ':'
+                    let val = self.expression();
+                    (n, val)
+                } else {
+                    // positional — put the identifier back as an expression
+                    (String::new(), Expr::Variable(n))
+                }
+            } else {
+                (String::new(), self.expression())
+            };
+            fields.push((field_name, value));
+            if !self.check(&TokenType::Comma) { break; }
+            self.advance();
+        }
+          eprintln!("DEBUG struct_init: about to consume RBrace, next token is {:?}", self.peek());
+        self.consume(TokenType::RBrace, "Expect '}' after struct init.");
+        Expr::StructInit { name, fields }
     }
 
     fn binary(&mut self, left: Expr, op_tok: TokenType) -> Expr {
@@ -291,6 +346,7 @@ impl Parser {
             TokenType::Slash | TokenType::Star => Precedence::Factor, 
             TokenType::Plus | TokenType::Minus => Precedence::Term,
             TokenType::LParen => Precedence::Call,
+            TokenType::Dot => Precedence::Call, 
             TokenType::Equal => Precedence::Assignment,
             _ => Precedence::None,
         }

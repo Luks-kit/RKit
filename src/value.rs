@@ -17,6 +17,7 @@ pub enum Value {
     Null,
 }
 
+
 impl Value {
     // Helper to print values, similar to your C switch statement
     pub fn to_string(&self) -> String {
