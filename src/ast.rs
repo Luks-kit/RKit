@@ -45,4 +45,10 @@ pub enum Stmt {
         body: Box<Stmt>,
     },
     Return(Expr),
+    Extern {
+        name: String,
+        params: Vec<(String, String)>, // (name, type)
+        return_type: String,
+        variadic: bool,
+    }
 }

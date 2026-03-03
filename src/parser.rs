@@ -38,6 +38,7 @@ impl Parser {
             TokenType::Int | TokenType::Str 
             | TokenType::Bool | TokenType::Float => self.var_declaration(),
             TokenType::Fn => self.fn_declaration(),
+            TokenType::Extern => self.extern_declaration(),
             _ => self.statement(),
         }
     }
@@ -93,6 +94,41 @@ impl Parser {
         let body = self.block();
         
         Stmt::Function { name, params: params, return_type: ret_type, body }
+    }
+    
+    fn extern_declaration(&mut self) -> Stmt {
+        self.advance(); // consume 'extern'
+        self.consume(TokenType::Fn, "Expect 'fn' after 'extern'.");
+        
+        let ret_type = format!("{:?}", self.advance()); // return type
+        let name = if let TokenType::Identifier(n) = self.consume_ident() { n }
+            else { panic!("Expected function name"); };
+        
+        self.consume(TokenType::LParen, "Expect '(' after function name.");
+        
+        let mut params = Vec::new();
+        let mut variadic = false;
+        if !self.check(&TokenType::RParen) {
+            loop {
+                if self.check(&TokenType::Variadic) {
+                    // consume '...'
+                    self.advance(); 
+                    variadic = true;
+                    break;
+                }
+                let p_type = format!("{:?}", self.advance());
+                let p_name = if let TokenType::Identifier(n) = self.consume_ident() { n }
+                    else { panic!("Expected parameter name"); };
+                params.push((p_name, p_type));
+                if !self.check(&TokenType::Comma) { break; }
+                self.advance();
+            }
+        }
+
+        self.consume(TokenType::RParen, "Expect ')' after params.");
+        self.consume(TokenType::Semicolon, "Expect ';' after extern declaration.");
+        
+        Stmt::Extern { name, params, return_type: ret_type, variadic }
     }
 
     fn statement(&mut self) -> Stmt {

@@ -5,7 +5,7 @@ pub enum TokenType {
     // Keywords
     Fn, Int, Str, Float, Bool, 
     Return, If, Else, While,
-    
+    Extern,
     // Literals & Identifiers
     Identifier(String),
     Literal(Value),
@@ -15,7 +15,7 @@ pub enum TokenType {
     EqualEqual, NotEqual,
     Less, Greater, LessEqual, GreaterEqual,
     LParen, RParen, LBrace, RBrace, 
-    Semicolon, Comma,
+    Semicolon, Comma, Dot, Variadic,
     
     EOF,
 }
@@ -97,6 +97,19 @@ impl<'a> Lexer<'a> {
                     TokenType::Greater
                 }
             }
+            '.' => {
+                if self.input.peek() == Some(&'.') {
+                    self.input.next();
+                    if self.input.peek() == Some(&'.') {
+                        self.input.next();
+                        TokenType::Variadic
+                    } else {
+                        panic!("Unexpected '..' — did you mean '...'?");
+                    }
+                } else {
+                    panic!("Unexpected '.'");
+                }
+            }
 
             '"' => self.read_string(),
             _ if c.is_ascii_digit() => self.read_number(c),
@@ -120,6 +133,7 @@ impl<'a> Lexer<'a> {
         // Match keywords
         match ident.as_str() {
             "fn" => TokenType::Fn,
+            "extern" => TokenType::Extern,
             "int" => TokenType::Int,
             "str" => TokenType::Str,
             "float" => TokenType::Float,
@@ -136,21 +150,46 @@ impl<'a> Lexer<'a> {
 
     fn read_number(&mut self, first_char: char) -> TokenType {
         let mut number = String::from(first_char);
+        let mut is_float = false;
+        
         while let Some(&c) = self.input.peek() {
             if c.is_ascii_digit() {
                 number.push(self.input.next().unwrap());
-            } else { break; }
+            } else if c == '.' && !is_float {
+                is_float = true;
+                number.push(self.input.next().unwrap());
+            } else {
+                break;
+            }
         }
-        let val = number.parse::<i64>().unwrap_or(0);
-        TokenType::Literal(Value::Int(val))     
+        
+        if is_float {
+            let val = number.parse::<f64>().unwrap_or(0.0);
+            TokenType::Literal(Value::Float(val))
+        } else {
+            let val = number.parse::<i64>().unwrap_or(0);
+            TokenType::Literal(Value::Int(val))
+        }
     }
-    
+
     fn read_string(&mut self) -> TokenType {
         let mut s = String::new();
         while let Some(c) = self.input.next() {
             if c == '"' { break; }
-            s.push(c);
-        }
+            if c == '\\' {
+                match self.input.next() {
+                    Some('n')  => s.push('\n'),
+                    Some('t')  => s.push('\t'),
+                    Some('r')  => s.push('\r'),
+                    Some('\\') => s.push('\\'),
+                    Some('"')  => s.push('"'),
+                    Some(c)    => { s.push('\\'); s.push(c); }
+                    None       => break,
+                }
+            } else {
+                s.push(c);
+            }
+        } 
         TokenType::Literal(Value::Str(s))
     }
 }
