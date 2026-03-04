@@ -7,8 +7,10 @@ mod types;
 mod typechecker;
 
 use lexer::{Lexer, Token};
+use std::collections::{HashSet, HashMap};
 use lexer::TokenType;
 use parser::Parser;
+use ast::Stmt;
 use typechecker::TypeChecker;
 use compiler::Compiler;
 use inkwell::context::Context;
@@ -32,6 +34,34 @@ fn lex(source: &str) -> Vec<Token> {
 
 use std::env;
 use std::fs;
+
+fn load_module(
+    name: &str, 
+    search_paths: &[&str],
+    loaded: &mut HashSet<String>
+) -> Vec<Stmt> {
+    if loaded.contains(name) {
+        return vec![];  // already loaded
+    }
+    loaded.insert(name.to_string());
+
+    // find the file
+    let filename = format!("{}.lk", name);
+    let path = search_paths.iter()
+        .map(|p| std::path::Path::new(p).join(&filename))
+        .find(|p| p.exists())
+        .unwrap_or_else(|| panic!("Cannot find module '{}'", name));
+
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|_| panic!("Cannot read module '{}'", name));
+
+    let tokens = lex(&source);
+    let stmts = Parser::new(tokens).parse();
+
+    // tag all top-level declarations with module name
+    // (we'll handle this via the module registry, not AST mutation)
+    stmts
+}
 
 fn main() {
     let args: Vec<String> = env::args().collect();
@@ -59,9 +89,31 @@ fn main() {
     let mut parser = Parser::new(tokens);
     let stmts_unchecked = parser.parse();
     
-    // Typecheck
+    // resolve imports
+    let mut loaded = HashSet::new();
+    let mut all_modules: HashMap<String, Vec<Stmt>> = HashMap::new();
+
+    for stmt in &stmts_unchecked {
+        if let Stmt::Import { module_name } = stmt {
+            let module_stmts = load_module(
+                 module_name.as_str(),
+                &[".", "/usr/local/lib/lkit"],  // search paths
+                &mut loaded
+            );
+            all_modules.insert(module_name.clone(), module_stmts);
+        }
+    }
+    
     let mut checker = TypeChecker::new();
+    
+    for (mod_name, mod_stmts) in &all_modules {
+        checker.register_module(mod_name, mod_stmts);
+    }
+    
+    checker.register_pass(&stmts_unchecked);
+
     checker.check(&stmts_unchecked);
+    
     if !checker.errors.is_empty() {
         for err in &checker.errors {
             eprintln!("Type error: {}", err.message);
@@ -74,7 +126,17 @@ fn main() {
     // Compile
     let context = Context::create();
     let mut compiler = Compiler::new(&context, "rkit");
+    
+    // compile modules first
+    for (mod_name, mod_stmts) in &all_modules {
+        compiler.modules.insert(mod_name.clone());
+        if let Result::Err(err) =  compiler.compile_module(mod_name, mod_stmts.clone()){
+            eprintln!("Error compiling module {}: {}", mod_name, err); 
+            std::process::exit(1);
+        }
+    }
 
+    // then compile main file
     for stmt in stmts {
         compiler.compile_statement(stmt).unwrap_or_else(|e| {
             eprintln!("Compile error: {}", e);

@@ -80,6 +80,9 @@ pub enum Stmt {
         initializer: Expr,
     },
     Block(Vec<Stmt>),
+    Import {
+        module_name: String,
+    }, 
     Function {
         name: String,
         params: Vec<(String, String)>, // (name, type)

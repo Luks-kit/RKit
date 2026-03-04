@@ -35,6 +35,8 @@ pub struct TypeChecker {
     pub structs: HashMap<String, StructDef>,
     pub extends: HashMap<String, ExtendDef>,
     current_return_type: Option<LKitType>,
+    pub modules: HashMap<String, Vec<Stmt>>,
+    pub module_exports: HashMap<String, HashMap<String, LKitType>>,
     pub errors: Vec<TypeError>,
     borrow_state: HashMap<String, (usize, bool)>,
 }
@@ -47,12 +49,14 @@ impl TypeChecker {
             structs: HashMap::new(),
             extends: HashMap::new(),
             current_return_type: None,
+            modules: HashMap::new(),
+            module_exports: HashMap::new(),
             errors: Vec::new(),
             borrow_state: HashMap::new(),
         }
     }
 
-    pub fn check(&mut self, stmts: &[Stmt]) {
+    pub fn register_pass(&mut self, stmts: &[Stmt]) {
         // Zero'th pass: register all structs        
         for stmt in stmts {
             if let Stmt::Struct { name, fields } = stmt {
@@ -93,7 +97,7 @@ impl TypeChecker {
             }
         }
         
-        // third pass: register extend blocks
+        // second pass: register extend blocks
         for stmt in stmts {
             if let Stmt::Extend { type_name, items } = stmt {
                 let mut def = ExtendDef {
@@ -128,12 +132,16 @@ impl TypeChecker {
                 self.extends.insert(type_name.clone(), def);
             }
         }
-
-        // Third pass: check everything
+    }
+    
+    pub fn check(&mut self, stmts: &[Stmt]) {
+        // check everything
         for stmt in stmts {
             self.check_stmt(stmt);
         }
     }
+
+
 
     fn push_scope(&mut self) { self.scopes.push(HashMap::new()); }
     fn pop_scope(&mut self) {
@@ -190,11 +198,12 @@ impl TypeChecker {
                 };
                 match self.check_expr(initializer) {
                     Some(actual) if actual != expected => {
+                        if actual == LKitType::Int && expected == LKitType::Byte { } else {
                         self.errors.push(TypeError::new(format!(
                             "Type mismatch in '{}': expected {:?}, got {:?}",
                             name, expected, actual
                         )));
-                    }
+                    } }
                     _ => {}
                 }
                 // track referent for handle types
@@ -361,6 +370,7 @@ impl TypeChecker {
 
             Stmt::Extern { .. } => {} // already registered in first pass
             Stmt::Struct { .. } => {} // already registered
+            Stmt::Import { .. } => {} // imports done early
         }
     }
 
@@ -419,6 +429,7 @@ impl TypeChecker {
                         // unwrap handle, but reject shared handles
                         let base_ty = match obj_ty {
                             LKitType::StrictRef(inner) => *inner,
+                            LKitType::HeapOwner(inner) => *inner,
                             LKitType::Ref(_) => {
                                 self.errors.push(TypeError::new(
                                     "Cannot assign to field through shared handle"
@@ -468,7 +479,7 @@ impl TypeChecker {
                         }
                     }
                     _ => {
-                        self.errors.push(TypeError::new("Invalid assignment target"));
+                        self.errors.push(TypeError::new(format!("Invalid assignment target: - {:?} - = {:?}", target, value)));
                         return None;
                     }
                 };
@@ -476,11 +487,12 @@ impl TypeChecker {
                 // 2. Type-check the value being assigned and compare to target
                 match self.check_expr(value) {
                     Some(val_ty) if val_ty != target_ty => {
+                        if val_ty == LKitType::Int && target_ty == LKitType::Byte { Some(LKitType::Byte) } else {
                         self.errors.push(TypeError::new(format!(
                             "Cannot assign {:?} to {:?}", val_ty, target_ty
                         )));
                         None
-                    }
+                    } }
                     other => other,
                 }
             }
@@ -509,21 +521,35 @@ impl TypeChecker {
                 }
             }
 
+           
             Expr::Binary { left, op, right } => {
                 let l = self.check_expr(left)?;
                 let r = self.check_expr(right)?;
-                if l != r {
-                    self.errors.push(TypeError::new(format!(
-                        "Binary op {:?} on mismatched types {:?} and {:?}", op, l, r
-                    )));
-                    return None;
-                }
+
+                // resolve numeric type compatibility
+                let result_ty = match (&l, &r) {
+                    // exact match — always ok
+                    (a, b) if a == b => l.clone(),
+                    // numeric widening: byte op int -> int
+                    (LKitType::Byte, LKitType::Int) | (LKitType::Int, LKitType::Byte) => LKitType::Int,
+                    // numeric widening: byte op float -> float
+                    (LKitType::Byte, LKitType::Float) | (LKitType::Float, LKitType::Byte) => LKitType::Float,
+                    // int op float -> float
+                    (LKitType::Int, LKitType::Float) | (LKitType::Float, LKitType::Int) => LKitType::Float,
+                    _ => {
+                        self.errors.push(TypeError::new(format!(
+                            "Binary op {:?} on mismatched types {:?} and {:?}", op, l, r
+                        )));
+                        return None;
+                    }
+                };
+
                 match op {
                     TokenType::EqualEqual | TokenType::NotEqual |
                     TokenType::Less | TokenType::LessEqual |
                     TokenType::Greater | TokenType::GreaterEqual
                         => Some(LKitType::Bool),
-                    _   => Some(l),
+                    _ => Some(result_ty),
                 }
             }
 
@@ -597,7 +623,8 @@ impl TypeChecker {
                 let obj_ty = self.check_expr(object)?;
                 // unwrap handle
                 let base_ty = match obj_ty {
-                    LKitType::Ref(inner) | LKitType::StrictRef(inner) 
+                    LKitType::Ref(inner) 
+                    | LKitType::StrictRef(inner) 
                     | LKitType::HeapOwner(inner) => *inner,
                     other => other,
                 };
@@ -775,54 +802,89 @@ impl TypeChecker {
             }
 
             Expr::MethodCall { object, method, args } => {
-                let obj_ty = self.check_expr(object)?;
-                // unwrap handle
-                let base_ty = match obj_ty {
-                    LKitType::Ref(inner) | LKitType::StrictRef(inner) => *inner,
-                    other => other,
-                };
-                let type_name = match &base_ty {
-                    LKitType::Struct(n) => n.clone(),
-                    other => {
-                        self.errors.push(TypeError::new(format!(
-                            "Cannot call method on non-struct type {:?}", other
-                        )));
-                        return None;
-                    }
-                };
-                let extend_def = match self.extends.get(&type_name) {
-                    Some(d) => d.clone(),
-                    None => {
-                        self.errors.push(TypeError::new(format!(
-                            "No extend block for type '{}'", type_name
-                        )));
-                        return None;
-                    }
-                };
-                let sig = match extend_def.methods.get(method) {
-                    Some(s) => s.clone(),
-                    None => {
-                        self.errors.push(TypeError::new(format!(
-                            "No method '{}' on type '{}'", method, type_name
-                        )));
-                        return None;
-                    }
-                };
-                // check args — skip first param (this)
-                let expected_params = &sig.params[1..];
-                for (arg, expected) in args.iter().zip(expected_params.iter()) {
-                    match self.check_expr(arg) {
-                        Some(actual) if &actual != expected => {
-                            self.errors.push(TypeError::new(format!(
-                                "Argument type mismatch in call to '{}::{}': expected {:?}, got {:?}",
-                                type_name, method, expected, actual
-                            )));
+                if let Expr::Variable(name) = object.as_ref() {
+                    // clone to release the borrow on self
+                    let exports = self.module_exports.get(name.as_str()).cloned();
+                    if let Some(exports) = exports {
+                        let sig = match exports.get(method.as_str()) {
+                            Some(LKitType::Function { params, ret }) => {
+                                Some((params.clone(), ret.clone()))
+                            }
+                            _ => None,
+                        };
+                        match sig {
+                            Some((params, ret)) => {
+                                for (arg, expected) in args.iter().zip(params.iter()) {
+                                    match self.check_expr(arg) {
+                                        Some(actual) if &actual != expected => {
+                                            self.errors.push(TypeError::new(format!(
+                                                "Arg mismatch in {}.{}: expected {:?} got {:?}",
+                                                name, method, expected, actual
+                                            )));
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                return Some(*ret);
+                            }
+                            None => {
+                                self.errors.push(TypeError::new(format!(
+                                    "No function '{}' in module '{}'", method, name
+                                )));
+                                return None;
+                            }
                         }
-                        _ => {}
                     }
+                } 
+
+            let obj_ty = self.check_expr(object)?;
+            // unwrap handle
+            let base_ty = match obj_ty {
+                LKitType::Ref(inner) | LKitType::StrictRef(inner) => *inner,
+                other => other,
+            };
+            let type_name = match &base_ty {
+                LKitType::Struct(n) => n.clone(),
+                other => {
+                    self.errors.push(TypeError::new(format!(
+                        "Cannot call method on non-struct type {:?}", other
+                    )));
+                    return None;
                 }
-                Some(sig.ret.clone())
+            };
+            let extend_def = match self.extends.get(&type_name) {
+                Some(d) => d.clone(),
+                None => {
+                    self.errors.push(TypeError::new(format!(
+                        "No extend block for type '{}'", type_name
+                    )));
+                    return None;
+                }
+            };
+            let sig = match extend_def.methods.get(method) {
+                Some(s) => s.clone(),
+                None => {
+                    self.errors.push(TypeError::new(format!(
+                        "No method '{}' on type '{}'", method, type_name
+                    )));
+                    return None;
+                }
+            };
+            // check args — skip first param (this)
+            let expected_params = &sig.params[1..];
+            for (arg, expected) in args.iter().zip(expected_params.iter()) {
+                match self.check_expr(arg) {
+                    Some(actual) if &actual != expected => {
+                        self.errors.push(TypeError::new(format!(
+                            "Argument type mismatch in call to '{}::{}': expected {:?}, got {:?}",
+                            type_name, method, expected, actual
+                        )));
+                    }
+                    _ => {}
+                }
             }
+            Some(sig.ret.clone())
+        }
 
            
         }
@@ -884,6 +946,33 @@ impl TypeChecker {
             // Everything else passes through unchanged
             other => other,
         }
+    }
+    
+    pub fn register_module(&mut self, name: &str, stmts: &[Stmt]) {
+        // run struct/extend/function registration passes
+        self.register_pass(stmts);
+        
+        // collect exports: functions, structs, extends
+        let mut exports = HashMap::new();
+        for stmt in stmts {
+            match stmt {
+                Stmt::Function { name: fn_name, params, return_type, .. } => {
+                    let param_types = params.iter()
+                        .filter_map(|(_, ty)| LKitType::from_str(ty))
+                        .collect();
+                    let ret = LKitType::from_str(return_type).unwrap_or(LKitType::Void);
+                    exports.insert(fn_name.clone(), LKitType::Function {
+                        params: param_types,
+                        ret: Box::new(ret),
+                    });
+                }
+                Stmt::Struct { name: sname, .. } => {
+                    exports.insert(sname.clone(), LKitType::Struct(sname.clone()));
+                }
+                _ => {}
+            }
+        }
+        self.module_exports.insert(name.to_string(), exports);
     }
 
     // helper methods:

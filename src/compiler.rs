@@ -7,7 +7,7 @@ use inkwell::types::BasicTypeEnum;
 use inkwell::types::BasicMetadataTypeEnum;
 use inkwell::{IntPredicate, FloatPredicate};
 use inkwell::AddressSpace;
-use std::collections::HashMap;
+use std::collections::{HashSet, HashMap};
 use crate::value::Value;
 use crate::lexer::TokenType;
 use crate::ast::{Expr, Stmt, ExtendItem};
@@ -34,6 +34,7 @@ pub struct Compiler<'ctx> {
     pub module: Module<'ctx>,
     pub builder: Builder<'ctx>,
     pub struct_defs: HashMap<String, StructDef>,
+    pub modules: HashSet<String>,
     pub variables: Vec<HashMap<String, VarSlot<'ctx>>>,
     pub extends: HashMap<String, CompiledExtend>,
 
@@ -47,6 +48,7 @@ impl<'ctx> Compiler<'ctx> {
             module: context.create_module(module_name),
             builder: context.create_builder(),
             variables: vec![HashMap::new()],  // start with one scope
+            modules: HashSet::new(),
             struct_defs: HashMap::new(),
             extends: HashMap::new(),
         }
@@ -94,12 +96,22 @@ impl<'ctx> Compiler<'ctx> {
 
            Expr::Assign { target, value } => {
                 let val = self.compile_expression(*value)?;
-                let (ptr, _) = self.compile_lvalue(&target)?;
+                let (ptr, pointee_ty) = self.compile_lvalue(&target)?;
+                // truncate if value type is wider than pointee type
+                let val = match (val, pointee_ty) {
+                    (BasicValueEnum::IntValue(i), BasicTypeEnum::IntType(t))
+                        if i.get_type().get_bit_width() > t.get_bit_width() => {
+                        self.builder.build_int_truncate(i, t, "trunc")
+                            .map_err(|e| e.to_string())?
+                            .as_basic_value_enum()
+                    }
+                    (v, _) => v,
+                };
                 self.builder.build_store(ptr, val)
                     .map_err(|e| e.to_string())?;
                 Ok(val)
-            }, 
-            
+            } 
+        
             Expr::Cast { target_type, expr } => {
                 let val = self.compile_expression(*expr)?;
                 let target_ty = self.type_str_to_llvm(&target_type);
@@ -282,7 +294,12 @@ impl<'ctx> Compiler<'ctx> {
                 let struct_ty = self.get_struct_type(&name)?;
                 let alloca = self.builder.build_alloca(struct_ty, &name)
                     .map_err(|e| e.to_string())?;
-                let _def = self.struct_defs.get(&name).cloned()
+                let base_name = name
+                    .trim_end_matches('*')
+                    .trim_end_matches('&')
+                    .trim_end_matches("strict")
+                   .trim();
+                let _def = self.struct_defs.get(base_name).cloned()
                     .ok_or_else(|| format!("Unknown struct '{}'", name))?;
                 for (i, (_, val_expr)) in fields.iter().enumerate() {
                     let val = self.compile_expression(val_expr.clone())?;
@@ -320,9 +337,13 @@ impl<'ctx> Compiler<'ctx> {
                 } else {
                     slot.ptr
                 };
-
-                let def = self.struct_defs.get(&struct_name).cloned()
-                    .ok_or_else(|| format!("Unknown struct '{}'", struct_name))?;
+                let base_name = struct_name
+                    .trim_end_matches('*')
+                    .trim_end_matches('&')
+                    .trim_end_matches("strict")
+                    .trim();
+                let def = self.struct_defs.get(base_name).cloned()
+                    .ok_or_else(|| format!("Unknown struct '{}'", base_name))?;
                 let idx = def.field_index(&field)
                     .ok_or_else(|| format!("No field '{}' on '{}'", field, struct_name))? as u32;
                 let struct_ty = self.get_struct_type(&struct_name)?;
@@ -447,45 +468,56 @@ impl<'ctx> Compiler<'ctx> {
                     _ => Err("Can only take handle of a variable".into()),
                 }
             }
-            Expr::MethodCall { object, method, args } => {
+           Expr::MethodCall { object, method, args } => {
                 let var_name = match *object {
                     Expr::Variable(ref n) => n.clone(),
                     _ => return Err("Complex method calls not yet supported".into()),
                 };
+
+                // check if it's a module call
+                if self.modules.contains(&var_name) {
+                    let mangled = format!("{}__{}", var_name, method);
+                    let function = self.module.get_function(&mangled)
+                        .ok_or_else(|| format!("No function '{}.{}' found", var_name, method))?;
+                    let compiled_args: Vec<BasicMetadataValueEnum> = args.into_iter()
+                        .map(|a| self.compile_expression(a).map(|v| v.into()))
+                        .collect::<Result<_, _>>()?;
+                    let call = self.builder.build_call(function, &compiled_args, "modcall")
+                        .map_err(|e| e.to_string())?;
+                    return match call.try_as_basic_value() {
+                        ValueKind::Basic(val) => Ok(val),
+                        ValueKind::Instruction(_) => Ok(self.context.i64_type()
+                            .const_int(0, false).as_basic_value_enum()),
+                    };
+                }
+
+                // otherwise it's a method call on a struct
                 let slot = self.lookup_var(&var_name)
                     .ok_or_else(|| format!("Undefined variable '{}'", var_name))?;
-
-                // get struct type name
                 let struct_name = slot.type_name
+                    .trim_end_matches('*')
                     .trim_end_matches('&')
                     .trim_end_matches("strict")
                     .trim()
                     .to_string();
-
                 let mangled = self.extends.get(&struct_name)
                     .and_then(|e| e.methods.get(&method))
                     .cloned()
                     .ok_or_else(|| format!("No method '{}' on '{}'", method, struct_name))?;
-
                 let function = self.module.get_function(&mangled)
                     .ok_or_else(|| format!("Method '{}' not compiled", mangled))?;
-
-                // first arg is 'this' — pass as pointer
                 let mut compiled_args: Vec<BasicMetadataValueEnum> = vec![slot.ptr.into()];
                 for arg in args {
                     compiled_args.push(self.compile_expression(arg)?.into());
                 }
-
                 let call = self.builder.build_call(function, &compiled_args, "methodcall")
                     .map_err(|e| e.to_string())?;
-
                 match call.try_as_basic_value() {
                     ValueKind::Basic(val) => Ok(val),
                     ValueKind::Instruction(_) => Ok(self.context.i64_type()
                         .const_int(0, false).as_basic_value_enum()),
                 }
-            }
-
+            } 
            
         }
     }
@@ -513,55 +545,37 @@ impl<'ctx> Compiler<'ctx> {
                 Ok(())
             }
             
-            Stmt::Return(Expr::Literal(Value::Null)) => {
-                for scope in self.variables.iter().rev() {
-                    for (_, slot) in scope {
-                        let struct_name = slot.type_name
-                            .trim_end_matches('&')
-                            .trim_end_matches("strict")
-                            .trim()
-                            .to_string();
-                        if let Some(extend) = self.extends.get(&struct_name).cloned() {
-                            if let Some(dinit_name) = extend.dinit_fn {
-                                if let Some(dinit_fn) = self.module.get_function(&dinit_name) {
-                                    self.builder.build_call(dinit_fn, &[slot.ptr.into()], "")
-                                        .map_err(|e| e.to_string())?;
-                                }
-                            }
-                        }
-                    }
+           Stmt::Return(Expr::Literal(Value::Null)) => {
+                let scopes: Vec<Vec<(String, PointerValue<'ctx>)>> = self.variables.iter()
+                    .map(|scope| scope.iter()
+                        .map(|(_, slot)| (slot.type_name.clone(), slot.ptr))
+                        .collect())
+                    .collect();
+                for scope_vars in scopes.iter().rev() {
+                    self.emit_dinits_for_vars(scope_vars)?;
                 }
-
                 self.builder.build_return(None)
                     .map_err(|e| e.to_string())?;
                 Ok(())
             }
-
-            Stmt::Return(expr) => {
+           Stmt::Return(expr) => {
                 let val = self.compile_expression(expr)?;
-                for scope in self.variables.iter().rev() {
-                    for (_, slot) in scope {
-                        let struct_name = slot.type_name
-                            .trim_end_matches('&')
-                            .trim_end_matches("strict")
-                            .trim()
-                            .to_string();
-                        if let Some(extend) = self.extends.get(&struct_name).cloned() {
-                            if let Some(dinit_name) = extend.dinit_fn {
-                                if let Some(dinit_fn) = self.module.get_function(&dinit_name) {
-                                    self.builder.build_call(dinit_fn, &[slot.ptr.into()], "")
-                                        .map_err(|e| e.to_string())?;
-                                }
-                            }
-                        }
-                    }
+                // emit dinits for all scopes WITHOUT popping them
+                let scopes: Vec<Vec<(String, PointerValue<'ctx>)>> = self.variables.iter()
+                    .map(|scope| scope.iter()
+                        .map(|(_, slot)| (slot.type_name.clone(), slot.ptr))
+                        .collect())
+                    .collect();
+                for scope_vars in scopes.iter().rev() {
+                    self.emit_dinits_for_vars(scope_vars)?;
                 }
-
                 self.builder.build_return(Some(&val))
                     .map_err(|e| e.to_string())?;
                 Ok(())
-            }
+            } 
 
+
+            
             Stmt::Block(stmts) => {
                 self.push_scope();
                 for s in stmts {
@@ -621,7 +635,16 @@ impl<'ctx> Compiler<'ctx> {
                 if let Some(last_block) = function.get_last_basic_block() {
                     if last_block.get_terminator().is_none() {
                         self.builder.position_at_end(last_block);
-                        self.emit_dinits_for_scope()?;
+                        
+                       let scopes: Vec<Vec<(String, PointerValue<'ctx>)>> = self.variables.iter()
+                            .map(|scope| scope.iter()
+                                .map(|(_, slot)| (slot.type_name.clone(), slot.ptr))
+                                .collect())
+                            .collect();
+                        for scope_vars in scopes.iter().rev() {
+                            self.emit_dinits_for_vars(scope_vars)?;
+                        }
+
                         let ret_type = function.get_type().get_return_type();
                         match ret_type {
                             None => {
@@ -904,9 +927,29 @@ impl<'ctx> Compiler<'ctx> {
             }
 
             Stmt::LetDecl { .. } => unreachable!("LetDecl should be folded by type checker"),
+            Stmt::Import { .. } => Ok(()),
         }
     }
     
+    
+    // when compiling module stmts, prefix function names:
+    pub fn compile_module(&mut self, module_name: &str, stmts: Vec<Stmt>) -> Result<(), String> {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Function { name, params, return_type, body } => {
+                    let mangled = format!("{}__{}", module_name, name);
+                    self.compile_statement(Stmt::Function {
+                        name: mangled,
+                        params,
+                        return_type,
+                        body,
+                    })?;
+                }
+                other => self.compile_statement(other)?,
+            }
+        }
+        Ok(())
+    }
 
     fn type_str_to_llvm(&self, ty: &str) -> BasicTypeEnum<'ctx> {
         match ty {
@@ -915,6 +958,7 @@ impl<'ctx> Compiler<'ctx> {
             "Bool" => self.context.bool_type().into(),
             "Str" => self.context.ptr_type(AddressSpace::default()).into(),
             "Ptr" => self.context.ptr_type(AddressSpace::default()).into(),
+            "Byte" => self.context.i8_type().into(),
             other if other.ends_with('&') => {
                 self.context.ptr_type(AddressSpace::default()).into()
             } 
@@ -998,6 +1042,7 @@ impl<'ctx> Compiler<'ctx> {
 
                 // strip handle wrapper from type name: "Point strict&" -> "Point"
                 let struct_name = slot.type_name
+                    .trim_end_matches('*')
                     .trim_end_matches('&')
                     .trim_end_matches("strict")
                     .trim()
@@ -1043,8 +1088,13 @@ impl<'ctx> Compiler<'ctx> {
 
     // Helper to get LLVM struct type:
     fn get_struct_type(&self, name: &str) -> Result<inkwell::types::StructType<'ctx>, String> {
-        let def = self.struct_defs.get(name)
-            .ok_or_else(|| format!("Unknown struct '{}'", name))?;
+       let base_name = name
+           .trim_end_matches('*')
+           .trim_end_matches('&')
+           .trim_end_matches("strict")
+           .trim();
+        let def = self.struct_defs.get(base_name)
+            .ok_or_else(|| format!("Unknown struct '{}'", base_name))?;
         let field_types: Vec<BasicTypeEnum> = def.fields.iter()
             .map(|(_, ty)| self.type_str_to_llvm(&ty.to_str()))
             .collect();
@@ -1073,25 +1123,20 @@ impl<'ctx> Compiler<'ctx> {
         None
     }
 
-        
-    fn emit_dinits_for_scope(&mut self) -> Result<(), String> {
-        let to_dinit: Vec<(String, PointerValue<'ctx>)> = self.variables.last()
-        .unwrap()
-        .iter()
-        .map(|(_, slot)| (slot.type_name.clone(), slot.ptr))
-        .collect();
 
-        for (type_name, ptr) in to_dinit {
+    fn emit_dinits_for_vars(&mut self, vars: &[(String, PointerValue<'ctx>)]) -> Result<(), String> {
+        for (type_name, ptr) in vars {
             let is_heap = type_name.ends_with('*');
             let struct_name = type_name
+                .trim_end_matches('*')
                 .trim_end_matches('&')
                 .trim_end_matches("strict")
                 .trim()
                 .to_string();
-             let heap_ptr = if is_heap {
+            let heap_ptr = if is_heap {
                 Some(self.builder.build_load(
                     self.context.ptr_type(AddressSpace::default()),
-                    ptr,
+                    *ptr,
                     "heap_ptr"
                 ).map_err(|e| e.to_string())?.into_pointer_value())
             } else {
@@ -1099,8 +1144,8 @@ impl<'ctx> Compiler<'ctx> {
             };
             if let Some(extend) = self.extends.get(&struct_name).cloned() {
                 if let Some(dinit_name) = extend.dinit_fn {
-                    let target = heap_ptr.unwrap_or(ptr);
                     if let Some(dinit_fn) = self.module.get_function(&dinit_name) {
+                        let target = heap_ptr.unwrap_or(*ptr);
                         self.builder.build_call(dinit_fn, &[target.into()], "")
                             .map_err(|e| e.to_string())?;
                     }
@@ -1120,4 +1165,16 @@ impl<'ctx> Compiler<'ctx> {
         Ok(())
     }
 
+    fn emit_dinits_for_scope(&mut self) -> Result<(), String> {
+        let vars: Vec<(String, PointerValue<'ctx>)> = match self.variables.last() {
+            Some(scope) => scope.iter()
+                .map(|(_, slot)| (slot.type_name.clone(), slot.ptr))
+                .collect(),
+            None => return Ok(()),
+        };
+        self.emit_dinits_for_vars(&vars)
+    }
+
+        
+  
 }

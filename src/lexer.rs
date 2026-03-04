@@ -7,7 +7,7 @@ pub enum TokenType {
     Return, If, Else, While,
     Extern, Struct, Len, Cast, 
     Extend, Init, Dinit,
-    Strict,
+    Strict, Import,
     // Literals & Identifiers
     Identifier(String),
     Literal(Value),
@@ -206,6 +206,7 @@ impl<'a> Lexer<'a> {
             "byte" => TokenType::Byte,
             "struct" => TokenType::Struct,
             "strict" => TokenType::Strict,
+            "import" => TokenType::Import,
             "cast" => TokenType::Cast,
             "extend" => TokenType::Extend,
             "init"   => TokenType::Init,

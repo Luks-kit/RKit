@@ -10,6 +10,7 @@ pub enum LKitType {
     Str,
     Ptr,
     Void,
+    Byte,
     Slice(Box<LKitType>, u64),
     DynSlice(Box<LKitType>),
     Ref(Box<LKitType>),        // T&
@@ -31,6 +32,7 @@ impl LKitType {
             "Bool"  => Some(LKitType::Bool),
             "Str"   => Some(LKitType::Str),
             "Void"  => Some(LKitType::Void),
+            "Byte" => Some(LKitType::Byte),
             "Ptr" => Some(LKitType::Ptr),
             other if other.ends_with('&') => {
                 let inner = other.trim_end_matches('&').trim();
@@ -75,6 +77,7 @@ impl LKitType {
             LKitType::Str     => "Str".to_string(),
             LKitType::Void    => "Void".to_string(),
             LKitType::Ptr     => "Ptr".to_string(),
+            LKitType::Byte => "Byte".to_string(),
             LKitType::Slice(inner, n) => format!("{}[{}]", inner.to_str(), n),
             LKitType::DynSlice(inner) => format!("[{}]", inner.to_str()),
             LKitType::Struct(name) => name.clone(),
@@ -91,6 +94,7 @@ impl LKitType {
             LKitType::Str => false,
             LKitType::Void => true,
             LKitType::Ptr => false,
+            LKitType::Byte => true,
             LKitType::Slice(_, _) => false,
             LKitType::DynSlice(_) => false,
             LKitType::Function { .. } => false,
@@ -141,6 +145,7 @@ pub fn ty_size(ty: &LKitType, structs: &HashMap<String, StructDef>) -> usize {
         LKitType::Str   => 8, // pointer
         LKitType::Ptr   => 8, 
         LKitType::Void  => 0,
+        LKitType::Byte => 1,
         LKitType::Slice(_,size) => *size as usize,
         LKitType::DynSlice(_) => 24, // ptr, len, 
         LKitType::Struct(name) => structs.get(name)

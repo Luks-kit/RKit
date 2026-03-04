@@ -35,8 +35,13 @@ impl Parser {
 
     fn declaration(&mut self) -> Stmt {
         match self.peek() {
-            TokenType::Int | TokenType::Str 
-            | TokenType::Bool | TokenType::Float | TokenType::Ptr => self.var_declaration(),
+            TokenType::Int 
+            | TokenType::Str 
+            | TokenType::Bool 
+            | TokenType::Float 
+            | TokenType::Ptr
+            | TokenType::Byte => self.var_declaration(),
+            TokenType::Import => self.import_decl(),
             TokenType::Fn => self.fn_declaration(),
             TokenType::Extern => self.extern_declaration(),
             TokenType::Struct => self.struct_declaration(),
@@ -44,6 +49,15 @@ impl Parser {
             TokenType::Extend => self.extend_declaration(),
             _ => self.statement(),
         }
+    }
+    
+    fn import_decl(&mut self) -> Stmt {
+       self.advance();
+        let name = if let TokenType::Identifier(n) = self.consume_ident() { n }
+            else { panic!("Expected module name after 'import'"); };
+        self.consume(TokenType::Semicolon, "Expect ';' after import.");
+        Stmt::Import { module_name: name }
+    
     }
 
     fn var_declaration(&mut self) -> Stmt {
@@ -591,8 +605,11 @@ impl Parser {
         // skip 'strict' and '&' tokens
         loop {
             match self.tokens.get(self.current + offset).map(|t| &t.kind) {
-                Some(TokenType::Strict) | Some(TokenType::Amp) 
-                | Some(TokenType::LBracket) | Some(TokenType::RBracket) => offset += 1,
+                Some(TokenType::Strict) 
+                | Some(TokenType::Amp) 
+                | Some(TokenType::Star)
+                | Some(TokenType::LBracket) 
+                | Some(TokenType::RBracket) => offset += 1,
                 Some(TokenType::Identifier(_)) => return true,
                 _ => return false,
             }
