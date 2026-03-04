@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use crate::ast::{Expr, Stmt};
+use crate::ast::{Expr, Stmt, ExtendItem};
 use crate::types::LKitType;
 use crate::value::Value;
 use crate::lexer::TokenType;
@@ -16,10 +16,24 @@ impl TypeError {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct MethodSig {
+    pub params: Vec<LKitType>,  // includes 'this' param
+    pub ret: LKitType,
+}
+
+#[derive(Debug, Clone)]
+pub struct ExtendDef {
+    pub init_params: Option<Vec<LKitType>>,  // None if no init defined
+    pub has_dinit: bool,
+    pub methods: HashMap<String, MethodSig>,
+}
+
 pub struct TypeChecker {
-    scopes: Vec<HashMap<String, LKitType>>,
+    scopes: Vec<HashMap<String, (LKitType, Option<String>)> >,
     functions: HashMap<String, LKitType>,
     pub structs: HashMap<String, StructDef>,
+    pub extends: HashMap<String, ExtendDef>,
     current_return_type: Option<LKitType>,
     pub errors: Vec<TypeError>,
     borrow_state: HashMap<String, (usize, bool)>,
@@ -31,6 +45,7 @@ impl TypeChecker {
             scopes: vec![HashMap::new()],
             functions: HashMap::new(),
             structs: HashMap::new(),
+            extends: HashMap::new(),
             current_return_type: None,
             errors: Vec::new(),
             borrow_state: HashMap::new(),
@@ -38,7 +53,7 @@ impl TypeChecker {
     }
 
     pub fn check(&mut self, stmts: &[Stmt]) {
-        //Zero'th pass: register all structs        
+        // Zero'th pass: register all structs        
         for stmt in stmts {
             if let Stmt::Struct { name, fields } = stmt {
                 let typed_fields = fields.iter()
@@ -77,23 +92,84 @@ impl TypeChecker {
                 });
             }
         }
+        
+        // third pass: register extend blocks
+        for stmt in stmts {
+            if let Stmt::Extend { type_name, items } = stmt {
+                let mut def = ExtendDef {
+                    init_params: None,
+                    has_dinit: false,
+                    methods: HashMap::new(),
+                };
+                for item in items {
+                    match item {
+                        ExtendItem::Init { params, .. } => {
+                            let param_types = params.iter()
+                                .filter_map(|(_, ty)| LKitType::from_str(ty))
+                                .collect();
+                            def.init_params = Some(param_types);
+                        }
+                        ExtendItem::Dinit { .. } => {
+                            def.has_dinit = true;
+                        }
+                        ExtendItem::Method { name, params, return_type, .. } => {
+                            let param_types = params.iter()
+                                .filter_map(|(_, ty)| LKitType::from_str(ty))
+                                .collect();
+                            let ret = LKitType::from_str(return_type)
+                                .unwrap_or(LKitType::Void);
+                            def.methods.insert(name.clone(), MethodSig {
+                                params: param_types,
+                                ret,
+                            });
+                        }
+                    }
+                }
+                self.extends.insert(type_name.clone(), def);
+            }
+        }
 
-        // Second pass: check everything
+        // Third pass: check everything
         for stmt in stmts {
             self.check_stmt(stmt);
         }
     }
 
     fn push_scope(&mut self) { self.scopes.push(HashMap::new()); }
-    fn pop_scope(&mut self)  { self.scopes.pop(); }
-
-    fn define(&mut self, name: &str, ty: LKitType) {
-        self.scopes.last_mut().unwrap().insert(name.to_string(), ty);
+    fn pop_scope(&mut self) {
+        if let Some(scope) = self.scopes.pop() {
+            for (_, (ty, referent)) in &scope {
+                if let Some(ref_name) = referent {
+                    match ty {
+                        LKitType::Ref(_) => {
+                            if let Some(state) = self.borrow_state.get_mut(ref_name) {
+                                if state.0 > 0 { state.0 -= 1; }
+                            }
+                        }
+                        LKitType::StrictRef(_) => {
+                            if let Some(state) = self.borrow_state.get_mut(ref_name) {
+                                state.1 = false;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
     }
+    fn define(&mut self, name: &str, ty: LKitType) {
+        self.scopes.last_mut().unwrap()
+            .insert(name.to_string(), (ty, None));
+    }
+
+    fn define_ref(&mut self, name: &str, ty: LKitType, referent: String) {
+        self.scopes.last_mut().unwrap()
+            .insert(name.to_string(), (ty, Some(referent)));
+    } 
 
     fn lookup(&self, name: &str) -> Option<&LKitType> {
         for scope in self.scopes.iter().rev() {
-            if let Some(ty) = scope.get(name) {
+            if let Some((ty, _)) = scope.get(name) {
                 return Some(ty);
             }
         }
@@ -121,12 +197,38 @@ impl TypeChecker {
                     }
                     _ => {}
                 }
-                self.define(name, expected);
+                // track referent for handle types
+                let referent = match initializer {
+                    Expr::Ref(inner) | Expr::StrictRef(inner) => {
+                        match inner.as_ref() {
+                            Expr::Variable(n) => Some(n.clone()),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                };
+                match referent {
+                    Some(r) => self.define_ref(name, expected, r),
+                    None    => self.define(name, expected),
+                }
             }
-
-            Stmt::LetDecl { name, initializer } => {
+           Stmt::LetDecl { name, initializer } => {
                 match self.check_expr(initializer) {
-                    Some(ty) => self.define(name, ty),
+                    Some(ty) => {
+                        let referent = match initializer {
+                            Expr::Ref(inner) | Expr::StrictRef(inner) => {
+                                match inner.as_ref() {
+                                    Expr::Variable(n) => Some(n.clone()),
+                                    _ => None,
+                                }
+                            }
+                            _ => None,
+                        };
+                        match referent {
+                            Some(r) => self.define_ref(name, ty, r),
+                            None    => self.define(name, ty),
+                        }
+                    }
                     None => self.errors.push(TypeError::new(
                         format!("Cannot infer type for '{}'", name)
                     )),
@@ -211,6 +313,49 @@ impl TypeChecker {
                 for s in stmts { self.check_stmt(s); }
                 self.pop_scope();
             }
+            
+            Stmt::Extend { type_name, items } => {
+                for item in items {
+                    match item {
+                        ExtendItem::Init { params, body } => {
+                            self.push_scope();
+                            // 'this' is implicit — define it as the struct type
+                            self.define("this", LKitType::Struct(type_name.clone()));
+                            for (p_name, p_type) in params {
+                                if let Some(ty) = LKitType::from_str(p_type) {
+                                    self.define(p_name, ty);
+                                }
+                            }
+                            self.current_return_type = Some(LKitType::Struct(type_name.clone()));
+                            for s in body { self.check_stmt(s); }
+                            self.current_return_type = None;
+                            self.pop_scope();
+                        }
+                        ExtendItem::Dinit { body } => {
+                            self.push_scope();
+                            self.define("this", LKitType::Struct(type_name.clone()));
+                            self.current_return_type = Some(LKitType::Void);
+                            for s in body { self.check_stmt(s); }
+                            self.current_return_type = None;
+                            self.pop_scope();
+                        }
+                        ExtendItem::Method 
+                        { name: _, params, return_type, body } => {
+                            self.push_scope();
+                            for (p_name, p_type) in params {
+                                if let Some(ty) = LKitType::from_str(p_type) {
+                                    self.define(p_name, ty);
+                                }
+                            }
+                            let ret = LKitType::from_str(return_type).unwrap_or(LKitType::Void);
+                            self.current_return_type = Some(ret);
+                            for s in body { self.check_stmt(s); }
+                            self.current_return_type = None;
+                            self.pop_scope();
+                        }
+                    }
+                }
+            }
 
             Stmt::Expression(expr) => { self.check_expr(expr); }
 
@@ -227,7 +372,6 @@ impl TypeChecker {
                 Value::Bool(_)  => LKitType::Bool,
                 Value::Str(_)   => LKitType::Str,
                 Value::Null     => LKitType::Void,
-                Value::Function(_) => return None,
                 
             }),
 
@@ -305,7 +449,7 @@ impl TypeChecker {
                             }
                         }
                     }
-                    Expr::Index { object, index } => {
+                    Expr::Index { object, index: _ } => {
                         match self.check_expr(object)? {
                             LKitType::Slice(inner, _) |
                             LKitType::DynSlice(inner) => *inner,
@@ -385,6 +529,31 @@ impl TypeChecker {
                         return None;
                     }
                 };
+                 if self.structs.contains_key(&name) {
+                    let extend_def = self.extends.get(&name).cloned();
+                    match extend_def.and_then(|d| d.init_params) {
+                        Some(params) => {
+                            for (arg, expected) in args.iter().zip(params.iter()) {
+                                match self.check_expr(arg) {
+                                    Some(actual) if &actual != expected => {
+                                        self.errors.push(TypeError::new(format!(
+                                            "Init arg mismatch for '{}': expected {:?}, got {:?}",
+                                            name, expected, actual
+                                        )));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            return Some(LKitType::Struct(name));
+                        }
+                        None => {
+                            self.errors.push(TypeError::new(format!(
+                                "Struct '{}' has no init defined", name
+                            )));
+                            return None;
+                        }
+                    }
+                }
                 match self.functions.get(&name).cloned() {
                     Some(LKitType::Function { params, ret }) => {
                         if args.len() != params.len() {
@@ -592,9 +761,57 @@ impl TypeChecker {
                 }
             }
 
-            Expr::Deref(inner) => {
-               Some(self.check_expr(inner)?)  
+            Expr::MethodCall { object, method, args } => {
+                let obj_ty = self.check_expr(object)?;
+                // unwrap handle
+                let base_ty = match obj_ty {
+                    LKitType::Ref(inner) | LKitType::StrictRef(inner) => *inner,
+                    other => other,
+                };
+                let type_name = match &base_ty {
+                    LKitType::Struct(n) => n.clone(),
+                    other => {
+                        self.errors.push(TypeError::new(format!(
+                            "Cannot call method on non-struct type {:?}", other
+                        )));
+                        return None;
+                    }
+                };
+                let extend_def = match self.extends.get(&type_name) {
+                    Some(d) => d.clone(),
+                    None => {
+                        self.errors.push(TypeError::new(format!(
+                            "No extend block for type '{}'", type_name
+                        )));
+                        return None;
+                    }
+                };
+                let sig = match extend_def.methods.get(method) {
+                    Some(s) => s.clone(),
+                    None => {
+                        self.errors.push(TypeError::new(format!(
+                            "No method '{}' on type '{}'", method, type_name
+                        )));
+                        return None;
+                    }
+                };
+                // check args — skip first param (this)
+                let expected_params = &sig.params[1..];
+                for (arg, expected) in args.iter().zip(expected_params.iter()) {
+                    match self.check_expr(arg) {
+                        Some(actual) if &actual != expected => {
+                            self.errors.push(TypeError::new(format!(
+                                "Argument type mismatch in call to '{}::{}': expected {:?}, got {:?}",
+                                type_name, method, expected, actual
+                            )));
+                        }
+                        _ => {}
+                    }
+                }
+                Some(sig.ret.clone())
             }
+
+           
         }
     }
 

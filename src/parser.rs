@@ -1,5 +1,5 @@
 use crate::lexer::{Token, TokenType};
-use crate::ast::{Expr, Stmt};
+use crate::ast::{Expr, Stmt, ExtendItem};
 use crate::value::Value;
 
 #[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
@@ -41,6 +41,7 @@ impl Parser {
             TokenType::Extern => self.extern_declaration(),
             TokenType::Struct => self.struct_declaration(),
             TokenType::Identifier(_) if self.is_var_declaration() => self.var_declaration(),
+            TokenType::Extend => self.extend_declaration(),
             _ => self.statement(),
         }
     }
@@ -147,6 +148,76 @@ impl Parser {
         }
         self.consume(TokenType::RBrace, "Expect '}' after struct body.");
         Stmt::Struct { name, fields }
+    }
+    
+    fn extend_declaration(&mut self) -> Stmt {
+        self.advance(); // consume 'extend'
+        let type_name = if let TokenType::Identifier(n) = self.consume_ident() { n }
+            else { panic!("Expected type name after 'extend'"); };
+        self.consume(TokenType::LBrace, "Expect '{' after type name.");
+
+        let mut items = Vec::new();
+        while !self.check(&TokenType::RBrace) && !self.is_at_end() {
+            let item = match self.peek().clone() {
+                TokenType::Init  => self.parse_init(),
+                TokenType::Dinit => self.parse_dinit(),
+                TokenType::Fn    => self.parse_method(),
+                _ => panic!("[line {}] Expected init, dinit, or fn in extend block", self.peek_line()),
+            };
+            items.push(item);
+        }
+        self.consume(TokenType::RBrace, "Expect '}' after extend block.");
+        Stmt::Extend { type_name, items }
+    }
+
+    fn parse_init(&mut self) -> ExtendItem {
+        self.advance(); // consume 'init'
+        self.consume(TokenType::LParen, "Expect '(' after 'init'.");
+        let mut params = Vec::new();
+        if !self.check(&TokenType::RParen) {
+            loop {
+                let p_type = self.parse_type();
+                let p_name = if let TokenType::Identifier(n) = self.consume_ident() { n }
+                    else { panic!("Expected parameter name"); };
+                params.push((p_name, p_type));
+                if !self.check(&TokenType::Comma) { break; }
+                self.advance();
+            }
+        }
+        self.consume(TokenType::RParen, "Expect ')' after init params.");
+        self.consume(TokenType::LBrace, "Expect '{' before init body.");
+        let body = self.block();
+        ExtendItem::Init { params, body }
+    }
+
+    fn parse_dinit(&mut self) -> ExtendItem {
+        self.advance(); // consume 'dinit'
+        self.consume(TokenType::LBrace, "Expect '{' before dinit body.");
+        let body = self.block();
+        ExtendItem::Dinit { body }
+    }
+
+    fn parse_method(&mut self) -> ExtendItem {
+        self.advance(); // consume 'fn'
+        let return_type = self.parse_type();
+        let name = if let TokenType::Identifier(n) = self.consume_ident() { n }
+            else { panic!("Expected method name"); };
+        self.consume(TokenType::LParen, "Expect '(' after method name.");
+        let mut params = Vec::new();
+        if !self.check(&TokenType::RParen) {
+            loop {
+                let p_type = self.parse_type();
+                let p_name = if let TokenType::Identifier(n) = self.consume_ident() { n }
+                    else { panic!("Expected parameter name"); };
+                params.push((p_name, p_type));
+                if !self.check(&TokenType::Comma) { break; }
+                self.advance();
+            }
+        }
+        self.consume(TokenType::RParen, "Expect ')' after method params.");
+        self.consume(TokenType::LBrace, "Expect '{' before method body.");
+        let body = self.block();
+        ExtendItem::Method { name, params, return_type, body }
     }
 
     fn statement(&mut self) -> Stmt {
@@ -300,8 +371,27 @@ impl Parser {
                 TokenType::Dot => {
                     let field = if let TokenType::Identifier(n) = self.consume_ident() { n }
                         else { panic!("Expected field name after '.'"); };
-                    Expr::FieldAccess { object: Box::new(left), field }
-                },
+                    // method call or field access?
+                    if self.check(&TokenType::LParen) {
+                        self.advance(); // consume '('
+                        let mut args = Vec::new();
+                        if !self.check(&TokenType::RParen) {
+                            loop {
+                                args.push(self.expression());
+                                if !self.check(&TokenType::Comma) { break; }
+                                self.advance();
+                            }
+                        }
+                        self.consume(TokenType::RParen, "Expect ')' after arguments.");
+                        Expr::MethodCall {
+                            object: Box::new(left),
+                            method: field,
+                            args,
+                        }
+                    } else {
+                        Expr::FieldAccess { object: Box::new(left), field }
+                    }
+                }                
                 TokenType::LBracket => {
                     let index = self.expression();
                     self.consume(TokenType::RBracket, "Expect ']' after index.");
@@ -435,11 +525,7 @@ impl Parser {
     }
 
        
-    fn peek_next_is_ident(&self) -> bool {
-        matches!(self.tokens.get(self.current + 1).map(|t| &t.kind), 
-            Some(TokenType::Identifier(_)))
-    }
-
+    
     fn parse_type(&mut self) -> String {
         // [T] — dynamic slice
         if self.check(&TokenType::LBracket) {
@@ -451,6 +537,7 @@ impl Parser {
 
         let base = match self.advance().clone() {
             TokenType::Identifier(n) => n,
+            TokenType::Ptr => "Ptr".to_string(),
             other => format!("{:?}", other),
         };
 

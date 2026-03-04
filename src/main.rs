@@ -82,10 +82,12 @@ fn main() {
         });
     }
 
-    compiler.module.print_to_stderr();
+    
+    let output_name = path.strip_suffix(".lk").unwrap_or(path);
+    let ir_path = format!("{}.ll", output_name);
+    let _ = compiler.module.print_to_file(ir_path);
 
     // Output filename: strip .lk, add .o
-    let output_name = path.strip_suffix(".lk").unwrap_or(path);
     let obj_path = format!("{}.o", output_name);
 
     Target::initialize_native(&InitializationConfig::default())
@@ -103,6 +105,11 @@ fn main() {
             CodeModel::Default,
         )
         .expect("Failed to create target machine");
+    
+    if let Err(err) = compiler.module.verify() {
+        eprintln!("LLVM verification error: {}", err.to_string());
+        std::process::exit(1);
+    } 
 
     machine
         .write_to_file(&compiler.module, FileType::Object, obj_path.as_ref())

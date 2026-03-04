@@ -2,6 +2,23 @@ use crate::value::Value;
 use crate::lexer::TokenType;
 
 #[derive(Debug, Clone)]
+pub enum ExtendItem {
+    Init {
+        params: Vec<(String, String)>,  // (name, type) — no 'this'
+        body: Vec<Stmt>,
+    },
+    Dinit {
+        body: Vec<Stmt>,
+    },
+    Method {
+        name: String,
+        params: Vec<(String, String)>,  // first param is 'this: T&' or 'this: T strict&'
+        return_type: String,
+        body: Vec<Stmt>,
+    },
+}
+
+#[derive(Debug, Clone)]
 pub enum Expr {
     Binary {
         left: Box<Expr>,
@@ -26,6 +43,11 @@ pub enum Expr {
         object: Box<Expr>,
         field: String,
     },
+    MethodCall {
+        object: Box<Expr>,
+        method: String,
+        args: Vec<Expr>,
+    },
     StructInit {
         name: String,
         fields: Vec<(String, Expr)>, // (field name, value) — positional uses ""
@@ -38,10 +60,10 @@ pub enum Expr {
     Len(Box<Expr>),
     Ref(Box<Expr>),        // &x
     StrictRef(Box<Expr>),  // &strict x
-    Deref(Box<Expr>),      // explicit deref if needed later
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Stmt {
     Expression(Expr),
     VarDecl {
@@ -79,5 +101,9 @@ pub enum Stmt {
     Struct{
         name: String,
         fields: Vec<(String, String)>,
+    },
+    Extend {
+        type_name: String,
+        items: Vec<ExtendItem>,
     },
 }

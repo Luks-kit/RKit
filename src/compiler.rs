@@ -10,7 +10,7 @@ use inkwell::AddressSpace;
 use std::collections::HashMap;
 use crate::value::Value;
 use crate::lexer::TokenType;
-use crate::ast::{Expr, Stmt};
+use crate::ast::{Expr, Stmt, ExtendItem};
 use crate::types::StructDef;
 use crate::types::LKitType;
 
@@ -22,23 +22,35 @@ pub struct VarSlot<'ctx> {
     pub type_name: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct CompiledExtend {
+    pub init_fn: Option<String>,   // mangled name: "TypeName__init"
+    pub dinit_fn: Option<String>,  // mangled name: "TypeName__dinit"
+    pub methods: HashMap<String, String>, // method name -> mangled name
+}
+
 pub struct Compiler<'ctx> {
     pub context: &'ctx Context,
     pub module: Module<'ctx>,
     pub builder: Builder<'ctx>,
     pub struct_defs: HashMap<String, StructDef>,
-    pub variables: HashMap<String, VarSlot<'ctx>>,
+    pub variables: Vec<HashMap<String, VarSlot<'ctx>>>,
+    pub extends: HashMap<String, CompiledExtend>,
 
 }
 
 impl<'ctx> Compiler<'ctx> {
+    
     pub fn new(context: &'ctx Context, module_name: &str) -> Self {
-        let module = context.create_module(module_name);
-        let builder = context.create_builder();
-        let variables: HashMap<String, VarSlot<'ctx>> = HashMap::new();
-        let struct_defs: HashMap<String, StructDef> = HashMap::new();
-        Compiler { context, module, builder, struct_defs, variables }
-    } 
+        Compiler {
+            context,
+            module: context.create_module(module_name),
+            builder: context.create_builder(),
+            variables: vec![HashMap::new()],  // start with one scope
+            struct_defs: HashMap::new(),
+            extends: HashMap::new(),
+        }
+    }
 
     pub fn compile_expression(&self, expr: Expr) -> Result<BasicValueEnum<'ctx>, String> {
         match expr {
@@ -52,11 +64,10 @@ impl<'ctx> Compiler<'ctx> {
                     Ok(global.as_pointer_value().as_basic_value_enum())
                 },
                 Value::Null        => Ok(self.context.i64_type().const_int(0, false).as_basic_value_enum()),
-                Value::Function(_) => Err("Cannot use function as literal value".into()),
             },
 
             Expr::Variable(name) => {
-                let slot = self.variables.get(&name)
+                let slot = self.lookup_var(&name)
                     .ok_or_else(|| format!("Undefined variable: {}", name))?;
                 let val = self.builder.build_load(slot.ty, slot.ptr, &name)
                     .map_err(|e| e.to_string())?;
@@ -187,6 +198,24 @@ impl<'ctx> Compiler<'ctx> {
                     Expr::Variable(name) => name,
                     _ => return Err("Only direct function calls supported".into()),
                 };
+                
+                // check if it's a struct init call
+                if let Some(extend) = self.extends.get(&callee_name).cloned() {
+                    if let Some(init_name) = extend.init_fn {
+                        let function = self.module.get_function(&init_name)
+                            .ok_or_else(|| format!("Init for '{}' not compiled", callee_name))?;
+                        let compiled_args: Vec<BasicMetadataValueEnum> = args.into_iter()
+                            .map(|a| self.compile_expression(a).map(|v| v.into()))
+                            .collect::<Result<_, _>>()?;
+                        let call = self.builder.build_call(function, &compiled_args, "initcall")
+                            .map_err(|e| e.to_string())?;
+                        return match call.try_as_basic_value() {
+                            ValueKind::Basic(val) => Ok(val),
+                            ValueKind::Instruction(_) => Err("Init returned void".into()),
+                        };
+                    }
+                }
+
                 let function = self.module.get_function(&callee_name)
                     .ok_or_else(|| format!("Undefined function: {}", callee_name))?;
                 let compiled_args: Vec<BasicMetadataValueEnum> = args.into_iter()
@@ -204,7 +233,7 @@ impl<'ctx> Compiler<'ctx> {
                 let struct_ty = self.get_struct_type(&name)?;
                 let alloca = self.builder.build_alloca(struct_ty, &name)
                     .map_err(|e| e.to_string())?;
-                let def = self.struct_defs.get(&name).cloned()
+                let _def = self.struct_defs.get(&name).cloned()
                     .ok_or_else(|| format!("Unknown struct '{}'", name))?;
                 for (i, (_, val_expr)) in fields.iter().enumerate() {
                     let val = self.compile_expression(val_expr.clone())?;
@@ -222,7 +251,7 @@ impl<'ctx> Compiler<'ctx> {
                     Expr::Variable(ref vname) => vname.clone(),
                     _ => return Err("Complex field access not yet supported".into()),
                 };
-                let slot = self.variables.get(&vname)
+                let slot = self.lookup_var(&vname)
                     .ok_or_else(|| format!("Undefined variable '{}'", vname))?;
 
                 // resolve struct name from type_name, stripping any handle wrapper
@@ -295,7 +324,7 @@ impl<'ctx> Compiler<'ctx> {
                     Expr::Variable(ref n) => n.clone(),
                     _ => return Err("Complex index expressions not yet supported".into()),
                 };
-                let slot = self.variables.get(&name)
+                let slot = self.lookup_var(&name)
                     .ok_or_else(|| format!("Undefined variable '{}'", name))?;
                 let is_const_index = matches!(*index, Expr::Literal(Value::Int(_)));
                 let idx_val = self.compile_expression(*index)?.into_int_value(); 
@@ -348,7 +377,7 @@ impl<'ctx> Compiler<'ctx> {
                     Expr::Variable(n) => n,
                     _ => return Err("len() argument must be a variable".into()),
                 };
-                let slot = self.variables.get(&name)
+                let slot = self.lookup_var(&name)
                     .ok_or_else(|| format!("Undefined variable '{}'", name))?;
                 match slot.ty {
                     BasicTypeEnum::ArrayType(arr_ty) => {
@@ -362,17 +391,53 @@ impl<'ctx> Compiler<'ctx> {
             Expr::Ref(inner) | Expr::StrictRef(inner) => {
                 match *inner {
                     Expr::Variable(name) => {
-                        let slot = self.variables.get(&name)
+                        let slot = self.lookup_var(&name)
                             .ok_or_else(|| format!("Undefined variable '{}'", name))?;
                         Ok(slot.ptr.as_basic_value_enum())
                     }
                     _ => Err("Can only take handle of a variable".into()),
                 }
             }
+            Expr::MethodCall { object, method, args } => {
+                let var_name = match *object {
+                    Expr::Variable(ref n) => n.clone(),
+                    _ => return Err("Complex method calls not yet supported".into()),
+                };
+                let slot = self.lookup_var(&var_name)
+                    .ok_or_else(|| format!("Undefined variable '{}'", var_name))?;
 
-            Expr::Deref(inner) => {
-                self.compile_expression(*inner)
+                // get struct type name
+                let struct_name = slot.type_name
+                    .trim_end_matches('&')
+                    .trim_end_matches("strict")
+                    .trim()
+                    .to_string();
+
+                let mangled = self.extends.get(&struct_name)
+                    .and_then(|e| e.methods.get(&method))
+                    .cloned()
+                    .ok_or_else(|| format!("No method '{}' on '{}'", method, struct_name))?;
+
+                let function = self.module.get_function(&mangled)
+                    .ok_or_else(|| format!("Method '{}' not compiled", mangled))?;
+
+                // first arg is 'this' — pass as pointer
+                let mut compiled_args: Vec<BasicMetadataValueEnum> = vec![slot.ptr.into()];
+                for arg in args {
+                    compiled_args.push(self.compile_expression(arg)?.into());
+                }
+
+                let call = self.builder.build_call(function, &compiled_args, "methodcall")
+                    .map_err(|e| e.to_string())?;
+
+                match call.try_as_basic_value() {
+                    ValueKind::Basic(val) => Ok(val),
+                    ValueKind::Instruction(_) => Ok(self.context.i64_type()
+                        .const_int(0, false).as_basic_value_enum()),
+                }
             }
+
+           
         }
     }
     
@@ -390,7 +455,7 @@ impl<'ctx> Compiler<'ctx> {
                     .map_err(|e| e.to_string())?;
                 self.builder.build_store(alloca, initial_val)
                     .map_err(|e| e.to_string())?;
-                self.variables.insert(name, VarSlot { ptr: alloca, ty, is_ref, type_name: value_type.clone() });
+                self.define_var(name, VarSlot { ptr: alloca, ty, is_ref, type_name: value_type.clone() });
                 Ok(())
             }
 
@@ -400,6 +465,24 @@ impl<'ctx> Compiler<'ctx> {
             }
             
             Stmt::Return(Expr::Literal(Value::Null)) => {
+                for scope in self.variables.iter().rev() {
+                    for (_, slot) in scope {
+                        let struct_name = slot.type_name
+                            .trim_end_matches('&')
+                            .trim_end_matches("strict")
+                            .trim()
+                            .to_string();
+                        if let Some(extend) = self.extends.get(&struct_name).cloned() {
+                            if let Some(dinit_name) = extend.dinit_fn {
+                                if let Some(dinit_fn) = self.module.get_function(&dinit_name) {
+                                    self.builder.build_call(dinit_fn, &[slot.ptr.into()], "")
+                                        .map_err(|e| e.to_string())?;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 self.builder.build_return(None)
                     .map_err(|e| e.to_string())?;
                 Ok(())
@@ -407,19 +490,41 @@ impl<'ctx> Compiler<'ctx> {
 
             Stmt::Return(expr) => {
                 let val = self.compile_expression(expr)?;
+                for scope in self.variables.iter().rev() {
+                    for (_, slot) in scope {
+                        let struct_name = slot.type_name
+                            .trim_end_matches('&')
+                            .trim_end_matches("strict")
+                            .trim()
+                            .to_string();
+                        if let Some(extend) = self.extends.get(&struct_name).cloned() {
+                            if let Some(dinit_name) = extend.dinit_fn {
+                                if let Some(dinit_fn) = self.module.get_function(&dinit_name) {
+                                    self.builder.build_call(dinit_fn, &[slot.ptr.into()], "")
+                                        .map_err(|e| e.to_string())?;
+                                }
+                            }
+                        }
+                    }
+                }
+
                 self.builder.build_return(Some(&val))
                     .map_err(|e| e.to_string())?;
                 Ok(())
             }
 
             Stmt::Block(stmts) => {
+                self.push_scope();
                 for s in stmts {
                     self.compile_statement(s)?;
                 }
+                self.emit_dinits_for_scope()?;
+                self.pop_scope();
                 Ok(())
             }
 
             Stmt::Function { name, params, return_type, body } => {
+                
                 // Build parameter types
                 let param_types: Vec<BasicMetadataTypeEnum> = params.iter()
                     .map(|(_, ty)| self.type_str_to_llvm(ty).into())
@@ -430,7 +535,8 @@ impl<'ctx> Compiler<'ctx> {
                     "Float" => self.context.f64_type().fn_type(&param_types, false),
                     "Bool" => self.context.bool_type().fn_type(&param_types, false),
                     "Str" => self.context.ptr_type(AddressSpace::default()).fn_type(&param_types, false),
-                    _ => self.context.i64_type().fn_type(&param_types, false), // default
+                    "Void" => self.context.void_type().fn_type(&param_types, false),
+                    other   => self.type_str_to_llvm(other).fn_type(&param_types, false), // default
                 };
 
                 let function = self.module.add_function(&name, fn_type, None);
@@ -439,6 +545,7 @@ impl<'ctx> Compiler<'ctx> {
 
                 // Save outer scope, create new one
                 let outer_vars = std::mem::take(&mut self.variables);
+                self.variables = vec![HashMap::new()];
 
                 // Bind parameters to allocas
                 for (i, (param_name, param_type)) in params.iter().enumerate() {
@@ -454,13 +561,37 @@ impl<'ctx> Compiler<'ctx> {
                         .ok_or_else(|| format!("Missing param {}", i))?;
                     self.builder.build_store(alloca, param_val)
                         .map_err(|e| e.to_string())?;
-                    self.variables.insert(param_name.clone(), VarSlot { ptr: alloca, ty, is_ref, type_name: param_type.clone() });
+                    self.define_var(param_name.clone(), VarSlot { ptr: alloca, ty, is_ref, type_name: param_type.clone() });
                 }
 
                 // Compile body
                 for s in body {
                     self.compile_statement(s)?;
                 }
+                
+                if let Some(last_block) = function.get_last_basic_block() {
+                    if last_block.get_terminator().is_none() {
+                        self.builder.position_at_end(last_block);
+                        self.emit_dinits_for_scope()?;
+                        let ret_type = function.get_type().get_return_type();
+                        match ret_type {
+                            None => {
+                                self.builder.build_return(None)
+                                    .map_err(|e| e.to_string())?;
+                            }
+                            Some(ty) => {
+                                let zero = match ty {
+                                    BasicTypeEnum::IntType(t)   => t.const_int(0, false).as_basic_value_enum(),
+                                    BasicTypeEnum::FloatType(t) => t.const_float(0.0).as_basic_value_enum(),
+                                    other => return Err(format!("Cannot emit fallback return for type {:?}", other)),
+                                };
+                                self.builder.build_return(Some(&zero))
+                                    .map_err(|e| e.to_string())?;
+                            }
+                        }
+                    }
+                }
+
 
                 // Restore outer scope
                 self.variables = outer_vars;
@@ -540,8 +671,9 @@ impl<'ctx> Compiler<'ctx> {
                     "Float" => self.context.f64_type().fn_type(&param_types, variadic),
                     "Bool"  => self.context.bool_type().fn_type(&param_types, variadic),
                     "Str"   => self.context.ptr_type(AddressSpace::default()).fn_type(&param_types, variadic),
+                    "Ptr"   => self.context.ptr_type(AddressSpace::default()).fn_type(&param_types, variadic),
                     "Void"  => self.context.void_type().fn_type(&param_types, variadic),
-                    _       => self.context.i64_type().fn_type(&param_types, variadic),
+                    other   => self.type_str_to_llvm(other).fn_type(&param_types, false),
                 };
                 
                 self.module.add_function(&name, fn_type, Some(inkwell::module::Linkage::External));
@@ -554,28 +686,186 @@ impl<'ctx> Compiler<'ctx> {
                 self.struct_defs.insert(name.clone(), StructDef { name, fields: typed_fields });
                 Ok(())
             }
+            
+            Stmt::Extend { type_name, items } => {
+                let mut compiled = CompiledExtend {
+                    init_fn: None,
+                    dinit_fn: None,
+                    methods: HashMap::new(),
+                };
+
+                for item in items {
+                    match item {
+                        ExtendItem::Init { params, body } => {
+                            let init_name = format!("{}__init", type_name);
+                            compiled.init_fn = Some(init_name.clone());
+
+                            // init takes params and returns the struct type
+                            let param_types: Vec<BasicMetadataTypeEnum> = params.iter()
+                                .map(|(_, ty)| self.type_str_to_llvm(ty).into())
+                                .collect();
+
+                            let struct_ty = self.get_struct_type(&type_name)?;
+                            let fn_type = struct_ty.fn_type(&param_types, false);
+                            let function = self.module.add_function(&init_name, fn_type, None);
+                            let entry = self.context.append_basic_block(function, "entry");
+                            self.builder.position_at_end(entry);
+
+                            let outer_vars = std::mem::take(&mut self.variables);
+                            self.variables = vec![HashMap::new()];
+                            // allocate 'this' as a local struct
+                            let this_alloca = self.builder.build_alloca(struct_ty, "this")
+                                .map_err(|e| e.to_string())?;
+                            self.define_var("this".to_string(), VarSlot {
+                                ptr: this_alloca,
+                                ty: struct_ty.into(),
+                                is_ref: false,
+                                type_name: type_name.clone(),
+                            });
+
+                            // bind params
+                            for (i, (p_name, p_type)) in params.iter().enumerate() {
+                                let ty = self.type_str_to_llvm(p_type);
+                                let alloca = self.builder.build_alloca(ty, p_name)
+                                    .map_err(|e| e.to_string())?;
+                                let param_val = function.get_nth_param(i as u32)
+                                    .ok_or_else(|| format!("Missing param {}", i))?;
+                                self.builder.build_store(alloca, param_val)
+                                    .map_err(|e| e.to_string())?;
+                                self.define_var(p_name.clone(), VarSlot {
+                                    ptr: alloca,
+                                    ty,
+                                    is_ref: false,
+                                    type_name: p_type.clone(),
+                                });
+                            }
+
+                            // compile body
+                            for s in body {
+                                self.compile_statement(s)?;
+                            }
+
+                            // implicit return this
+                            let this_val = self.builder.build_load(
+                                BasicTypeEnum::StructType(struct_ty), 
+                                this_alloca, 
+                                "this_ret"
+                            ).map_err(|e| e.to_string())?;
+                            self.builder.build_return(Some(&this_val))
+                                .map_err(|e| e.to_string())?;
+
+                            self.variables = outer_vars;
+                        }
+
+                        ExtendItem::Dinit { body } => {
+                            let dinit_name = format!("{}__dinit", type_name);
+                            compiled.dinit_fn = Some(dinit_name.clone());
+
+                            // dinit takes a pointer to the struct, returns void
+                            let struct_ty = self.get_struct_type(&type_name)?;
+                            let ptr_ty = self.context.ptr_type(AddressSpace::default());
+                            let fn_type = self.context.void_type().fn_type(&[ptr_ty.into()], false);
+                            let function = self.module.add_function(&dinit_name, fn_type, None);
+                            let entry = self.context.append_basic_block(function, "entry");
+                            self.builder.position_at_end(entry);
+
+                            let outer_vars = std::mem::take(&mut self.variables);
+                            self.variables = vec![HashMap::new()];
+                            // 'this' is the pointer param
+                            let this_ptr = function.get_nth_param(0).unwrap()
+                                .into_pointer_value();
+                            self.define_var("this".to_string(), VarSlot {
+                                ptr: this_ptr,
+                                ty: struct_ty.into(),
+                                is_ref: false,
+                                type_name: type_name.clone(),
+                            });
+
+                            for s in body {
+                                self.compile_statement(s)?;
+                            }
+
+                            self.builder.build_return(None)
+                                .map_err(|e| e.to_string())?;
+
+                            self.variables = outer_vars;
+                        }
+
+                        ExtendItem::Method { name, params, return_type, body } => {
+                            let method_name = format!("{}_{}", type_name, name);
+                            compiled.methods.insert(name.clone(), method_name.clone());
+
+                            let param_types: Vec<BasicMetadataTypeEnum> = params.iter()
+                                .map(|(_, ty)| self.type_str_to_llvm(ty).into())
+                                .collect();
+
+                            let ret_ty = match return_type.as_str() {
+                                "Int"   => self.context.i64_type().fn_type(&param_types, false),
+                                "Float" => self.context.f64_type().fn_type(&param_types, false),
+                                "Bool"  => self.context.bool_type().fn_type(&param_types, false),
+                                "Str"   => self.context.ptr_type(AddressSpace::default()).fn_type(&param_types, false),
+                                "Void"  => self.context.void_type().fn_type(&param_types, false),
+                                other   => self.type_str_to_llvm(other).fn_type(&param_types, false),
+                            };
+
+                            let function = self.module.add_function(&method_name, ret_ty, None);
+                            let entry = self.context.append_basic_block(function, "entry");
+                            self.builder.position_at_end(entry);
+
+                            let outer_vars = std::mem::take(&mut self.variables);
+                            self.variables = vec![HashMap::new()];
+
+                            for (i, (p_name, p_type)) in params.iter().enumerate() {
+                                let ty = self.type_str_to_llvm(p_type);
+                                let is_handle = p_type.ends_with('&');
+                                let alloca = self.builder.build_alloca(ty, p_name)
+                                    .map_err(|e| e.to_string())?;
+                                let param_val = function.get_nth_param(i as u32)
+                                    .ok_or_else(|| format!("Missing param {}", i))?;
+                                self.builder.build_store(alloca, param_val)
+                                    .map_err(|e| e.to_string())?;
+                                self.define_var(p_name.clone(), VarSlot {
+                                    ptr: alloca,
+                                    ty,
+                                    is_ref: is_handle,
+                                    type_name: p_type.clone(),
+                                });
+                            }
+
+                            for s in body {
+                                self.compile_statement(s)?;
+                            }
+
+                            // if void, emit return
+                            if return_type == "Void" {
+                                if self.builder.get_insert_block()
+                                    .unwrap().get_terminator().is_none() {
+                                    self.builder.build_return(None)
+                                        .map_err(|e| e.to_string())?;
+                                }
+                            }
+
+                            self.variables = outer_vars;
+                        }
+                    }
+                }
+
+                self.extends.insert(type_name, compiled);
+                Ok(())
+            }
 
             Stmt::LetDecl { .. } => unreachable!("LetDecl should be folded by type checker"),
         }
     }
     
 
-    fn value_to_llvm_type(&self, val: &Value) -> BasicTypeEnum<'ctx> {
-        match val {
-            Value::Int(_)  => self.context.i64_type().into(),
-            Value::Float(_) => self.context.f64_type().into(),
-            Value::Bool(_) => self.context.bool_type().into(),
-            Value::Str(_)  => self.context.ptr_type(AddressSpace::default()).into(),
-            Value::Null    => self.context.i64_type().into(), // or a unit type
-            Value::Function(_) => self.context.ptr_type(AddressSpace::default()).into(),
-        }
-    }
     fn type_str_to_llvm(&self, ty: &str) -> BasicTypeEnum<'ctx> {
         match ty {
             "Int" => self.context.i64_type().into(),
             "Float" => self.context.f64_type().into(),
             "Bool" => self.context.bool_type().into(),
             "Str" => self.context.ptr_type(AddressSpace::default()).into(),
+            "Ptr" => self.context.ptr_type(AddressSpace::default()).into(),
             other if other.ends_with('&') => {
                 self.context.ptr_type(AddressSpace::default()).into()
             }  
@@ -615,7 +905,7 @@ impl<'ctx> Compiler<'ctx> {
     fn compile_lvalue(&self, expr: &Expr) -> Result<(PointerValue<'ctx>, BasicTypeEnum<'ctx>), String> {
         match expr {
             Expr::Variable(name) => {
-                let slot = self.variables.get(name)
+                let slot = self.lookup_var(name)
                     .ok_or_else(|| format!("Undefined variable '{}'", name))?;
                 if slot.is_ref {
                     // deref the handle to get the pointer it points to
@@ -632,7 +922,7 @@ impl<'ctx> Compiler<'ctx> {
                     Expr::Variable(n) => n.clone(),
                     _ => return Err("Complex field assignment not yet supported".into()),
                 };
-                let slot = self.variables.get(&var_name)
+                let slot = self.lookup_var(&var_name)
                     .ok_or_else(|| format!("Undefined variable '{}'", var_name))?;
 
                 // deref handle if needed
@@ -670,7 +960,7 @@ impl<'ctx> Compiler<'ctx> {
                     Expr::Variable(n) => n.clone(),
                     _ => return Err("Complex index assignment not yet supported".into()),
                 };
-                let slot = self.variables.get(&name)
+                let slot = self.lookup_var(&name)
                     .ok_or_else(|| format!("Undefined variable '{}'", name))?;
                 let idx_val = self.compile_expression(*index.clone())?.into_int_value();
                 match slot.ty {
@@ -700,6 +990,54 @@ impl<'ctx> Compiler<'ctx> {
             .map(|(_, ty)| self.type_str_to_llvm(&ty.to_str()))
             .collect();
         Ok(self.context.struct_type(&field_types, false))
+    }
+
+     // scope helpers
+    fn push_scope(&mut self) {
+        self.variables.push(HashMap::new());
+    }
+
+    fn pop_scope(&mut self) {
+        self.variables.pop();
+    }
+
+    fn define_var(&mut self, name: String, slot: VarSlot<'ctx>) {
+        self.variables.last_mut().unwrap().insert(name, slot);
+    }
+
+    fn lookup_var(&self, name: &str) -> Option<&VarSlot<'ctx>> {
+        for scope in self.variables.iter().rev() {
+            if let Some(slot) = scope.get(name) {
+                return Some(slot);
+            }
+        }
+        None
+    }
+
+        
+    fn emit_dinits_for_scope(&mut self) -> Result<(), String> {
+        let to_dinit: Vec<(String, PointerValue<'ctx>)> = self.variables.last()
+        .unwrap()
+        .iter()
+        .map(|(_, slot)| (slot.type_name.clone(), slot.ptr))
+        .collect();
+
+        for (type_name, ptr) in to_dinit {
+            let struct_name = type_name
+                .trim_end_matches('&')
+                .trim_end_matches("strict")
+                .trim()
+                .to_string();
+            if let Some(extend) = self.extends.get(&struct_name).cloned() {
+                if let Some(dinit_name) = extend.dinit_fn {
+                    if let Some(dinit_fn) = self.module.get_function(&dinit_name) {
+                        self.builder.build_call(dinit_fn, &[ptr.into()], "")
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+            }
+        }
+        Ok(())
     }
 
 }

@@ -3,9 +3,11 @@ use crate::value::Value;
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenType {
     // Keywords
-    Fn, Int, Str, Float, Bool, Void,
+    Fn, Int, Str, Float, Bool, Void, Ptr, Byte,
     Return, If, Else, While,
-    Extern, Struct, Len, Strict,
+    Extern, Struct, Len, 
+    Extend, Init, Dinit,
+    Strict,
     // Literals & Identifiers
     Identifier(String),
     Literal(Value),
@@ -79,11 +81,35 @@ impl<'a> Lexer<'a> {
             ',' => TokenType::Comma,
             '+' => TokenType::Plus,
             '-' => TokenType::Minus,
-            '*' => TokenType::Star,
-            '/' => TokenType::Slash,            
+            '*' => TokenType::Star,          
             ':' => TokenType::Colon,
             '[' => TokenType::LBracket,
             ']' => TokenType::RBracket,
+            '/' => {
+                if self.input.peek() == Some(&'/') {
+                    while let Some(&c) = self.input.peek() {
+                        if c == '\n' { break; }
+                        self.input.next();
+                    }
+                    return self.next_token();
+                } else if self.input.peek() == Some(&'*') {
+                    self.input.next(); // consume '*'
+                    loop {
+                        match self.input.next() {
+                            Some('*') if self.input.peek() == Some(&'/') => {
+                                self.input.next(); // consume '/'
+                                break;
+                            }
+                            Some('\n') => { self.line += 1; }
+                            None => panic!("Unterminated block comment"),
+                            _ => {}
+                        }
+                    }
+                    return self.next_token();
+                } else {
+                    TokenType::Slash
+                }
+            }
             '=' => {
                 if self.input.peek() == Some(&'=') {
                     self.input.next();
@@ -176,8 +202,13 @@ impl<'a> Lexer<'a> {
             "float" => TokenType::Float,
             "bool" => TokenType::Bool,
             "void" => TokenType::Void,
+            "ptr" => TokenType::Ptr,
+            "byte" => TokenType::Byte,
             "struct" => TokenType::Struct,
             "strict" => TokenType::Strict,
+            "extend" => TokenType::Extend,
+            "init"   => TokenType::Init,
+            "dinit"  => TokenType::Dinit,
             "if" => TokenType::If,
             "else" => TokenType::Else,
             "while" => TokenType::While,

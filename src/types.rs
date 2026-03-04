@@ -8,6 +8,7 @@ pub enum LKitType {
     Float,
     Bool,
     Str,
+    Ptr,
     Void,
     Slice(Box<LKitType>, u64),
     DynSlice(Box<LKitType>),
@@ -29,6 +30,7 @@ impl LKitType {
             "Bool"  => Some(LKitType::Bool),
             "Str"   => Some(LKitType::Str),
             "Void"  => Some(LKitType::Void),
+            "Ptr" => Some(LKitType::Ptr),
             other if other.ends_with('&') => {
                 let inner = other.trim_end_matches('&').trim();
                 if inner.ends_with("strict") {
@@ -66,6 +68,7 @@ impl LKitType {
             LKitType::Bool    => "Bool".to_string(),
             LKitType::Str     => "Str".to_string(),
             LKitType::Void    => "Void".to_string(),
+            LKitType::Ptr     => "Ptr".to_string(),
             LKitType::Slice(inner, n) => format!("{}[{}]", inner.to_str(), n),
             LKitType::DynSlice(inner) => format!("[{}]", inner.to_str()),
             LKitType::Struct(name) => name.clone(),
@@ -74,11 +77,13 @@ impl LKitType {
             LKitType::StrictRef(inner) => format!("{} strict&", inner.to_str()),
         }
     }
+    #[allow(dead_code)]
     pub fn is_copy(&self, structs: &HashMap<String, StructDef>) -> bool {
         match self {
             LKitType::Int | LKitType::Float | LKitType::Bool => true,
             LKitType::Str => false,
             LKitType::Void => true,
+            LKitType::Ptr => false,
             LKitType::Slice(_, _) => false,
             LKitType::DynSlice(_) => false,
             LKitType::Function { .. } => false,
@@ -95,6 +100,7 @@ impl LKitType {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct StructDef {
     pub name: String,
     pub fields: Vec<(String, LKitType)>,
@@ -125,6 +131,7 @@ pub fn ty_size(ty: &LKitType, structs: &HashMap<String, StructDef>) -> usize {
         LKitType::Float => 8,
         LKitType::Bool  => 1,
         LKitType::Str   => 8, // pointer
+        LKitType::Ptr   => 8, 
         LKitType::Void  => 0,
         LKitType::Slice(_,size) => *size as usize,
         LKitType::DynSlice(_) => 24, // ptr, len, 
