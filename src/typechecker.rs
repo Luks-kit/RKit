@@ -375,9 +375,14 @@ impl TypeChecker {
                 
             }),
 
-            Expr::Variable(name) => {
+           Expr::Variable(name) => {
                 match self.lookup(name) {
-                    Some(ty) => Some(ty.clone()),
+                    Some(ty) => match ty.clone() {
+                        LKitType::Ref(inner)       => Some(*inner),
+                        LKitType::StrictRef(inner) => Some(*inner),
+                        LKitType::HeapOwner(inner) => Some(*inner),  // auto-deref
+                        other => Some(other),
+                    },
                     None => {
                         self.errors.push(TypeError::new(
                             format!("Undefined variable '{}'", name)
@@ -393,6 +398,7 @@ impl TypeChecker {
                     Expr::Variable(name) => {
                         match self.lookup(name) {
                             Some(LKitType::StrictRef(inner)) => *inner.clone(),
+                            Some(LKitType::HeapOwner(inner)) => *inner.clone(),
                             Some(LKitType::Ref(_)) => {
                                 self.errors.push(TypeError::new(
                                     format!("Cannot assign through shared handle '{}'", name)
@@ -580,12 +586,19 @@ impl TypeChecker {
                     }
                 }
             }
+            
 
-           Expr::FieldAccess { object, field } => {
+            Expr::Cast { target_type, expr } => {
+                // still check the inner expression for undefined variables etc.
+                self.check_expr(expr);
+                LKitType::from_str(target_type)
+            } 
+            Expr::FieldAccess { object, field } => {
                 let obj_ty = self.check_expr(object)?;
                 // unwrap handle
                 let base_ty = match obj_ty {
-                    LKitType::Ref(inner) | LKitType::StrictRef(inner) => *inner,
+                    LKitType::Ref(inner) | LKitType::StrictRef(inner) 
+                    | LKitType::HeapOwner(inner) => *inner,
                     other => other,
                 };
                 match base_ty {

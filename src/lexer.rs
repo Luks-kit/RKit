@@ -5,7 +5,7 @@ pub enum TokenType {
     // Keywords
     Fn, Int, Str, Float, Bool, Void, Ptr, Byte,
     Return, If, Else, While,
-    Extern, Struct, Len, 
+    Extern, Struct, Len, Cast, 
     Extend, Init, Dinit,
     Strict,
     // Literals & Identifiers
@@ -206,6 +206,7 @@ impl<'a> Lexer<'a> {
             "byte" => TokenType::Byte,
             "struct" => TokenType::Struct,
             "strict" => TokenType::Strict,
+            "cast" => TokenType::Cast,
             "extend" => TokenType::Extend,
             "init"   => TokenType::Init,
             "dinit"  => TokenType::Dinit,

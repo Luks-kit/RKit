@@ -36,7 +36,7 @@ impl Parser {
     fn declaration(&mut self) -> Stmt {
         match self.peek() {
             TokenType::Int | TokenType::Str 
-            | TokenType::Bool | TokenType::Float => self.var_declaration(),
+            | TokenType::Bool | TokenType::Float | TokenType::Ptr => self.var_declaration(),
             TokenType::Fn => self.fn_declaration(),
             TokenType::Extern => self.extern_declaration(),
             TokenType::Struct => self.struct_declaration(),
@@ -328,6 +328,14 @@ impl Parser {
                 self.consume(TokenType::RParen, "Expect ')' after len argument.");
                 Expr::Len(Box::new(expr))
             }
+            TokenType::Cast => {
+                self.consume(TokenType::LParen, "Expect '(' after 'cast'.");
+                let target_type = self.parse_type();
+                self.consume(TokenType::Comma, "Expect ',' after cast type.");
+                let expr = self.expression();
+                self.consume(TokenType::RParen, "Expect ')' after cast expression.");
+                Expr::Cast { target_type, expr: Box::new(expr) }
+            }
             TokenType::Amp => {
                 // &strict x or &x
                 if self.check(&TokenType::Strict) {
@@ -524,36 +532,45 @@ impl Parser {
         matches!(self.peek(), TokenType::EOF)
     }
 
-       
-    
-    fn parse_type(&mut self) -> String {
+   fn parse_type(&mut self) -> String {
         // [T] — dynamic slice
         if self.check(&TokenType::LBracket) {
-            self.advance(); // consume '['
+            self.advance();
             let inner = self.parse_type();
             self.consume(TokenType::RBracket, "Expect ']' after slice type.");
+            if self.check(&TokenType::Amp) {
+                self.advance();
+                return format!("[{}]&", inner);
+            }
             return format!("[{}]", inner);
         }
 
         let base = match self.advance().clone() {
             TokenType::Identifier(n) => n,
-            TokenType::Ptr => "Ptr".to_string(),
             other => format!("{:?}", other),
         };
 
         // T[N] — fixed slice
         if self.check(&TokenType::LBracket) {
-            self.advance(); // consume '['
-            let size = if let TokenType::Literal(Value::Int(n)) = self.advance().clone() {
-                n
-            } else {
-                panic!("Expected integer size in fixed slice type");
-            };
+            self.advance();
+            let size = if let TokenType::Literal(Value::Int(n)) = self.advance().clone() { n }
+                else { panic!("Expected integer size in fixed slice type"); };
             self.consume(TokenType::RBracket, "Expect ']' after slice size.");
-            return format!("{}[{}]", base, size);
+            let slice = format!("{}[{}]", base, size);
+            if self.check(&TokenType::Amp) {
+                self.advance();
+                return format!("{}&", slice);
+            }
+            return slice;
         }
-        
-         // T& or T strict&
+
+        // T* — heap owner
+        if self.check(&TokenType::Star) {
+            self.advance();
+            return format!("{}*", base);
+        }
+
+        // T& or T strict&
         if self.check(&TokenType::Amp) {
             self.advance();
             return format!("{}&", base);
@@ -565,8 +582,9 @@ impl Parser {
         }
 
         base
-    }
-
+    }    
+    
+    
     fn is_var_declaration(&self) -> bool {
         // look for: type [strict] [&] identifier
         let mut offset = 1;

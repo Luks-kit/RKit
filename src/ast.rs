@@ -60,6 +60,10 @@ pub enum Expr {
     Len(Box<Expr>),
     Ref(Box<Expr>),        // &x
     StrictRef(Box<Expr>),  // &strict x
+    Cast {
+        target_type: String,
+        expr: Box<Expr>,
+    }
 }
 
 #[derive(Debug, Clone)]

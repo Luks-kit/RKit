@@ -15,6 +15,7 @@ pub enum LKitType {
     Ref(Box<LKitType>),        // T&
     StrictRef(Box<LKitType>),  // T strict&
     Struct(String),
+    HeapOwner(Box<LKitType>),  // T*
     Function {
         params: Vec<LKitType>,
         ret: Box<LKitType>,
@@ -40,6 +41,11 @@ impl LKitType {
                     LKitType::from_str(inner).map(|t| LKitType::Ref(Box::new(t)))
                 }
             }
+            other if other.ends_with('*') => {
+                let inner = other.trim_end_matches('*').trim();
+                LKitType::from_str(inner).map(|t| LKitType::HeapOwner(Box::new(t)))
+            }
+
             other if other.starts_with('[') => {
                 // [T]
                 let inner = &other[1..other.len()-1];
@@ -75,6 +81,7 @@ impl LKitType {
             LKitType::Function { .. } => "Function".to_string(),
             LKitType::Ref(inner)       => format!("{}&", inner.to_str()),
             LKitType::StrictRef(inner) => format!("{} strict&", inner.to_str()),
+            LKitType::HeapOwner(inner) => format!("{}*", inner.to_str()),
         }
     }
     #[allow(dead_code)]
@@ -95,6 +102,7 @@ impl LKitType {
             }
             LKitType::Ref(_)       => true,  // shared read handle is copyable
             LKitType::StrictRef(_) => false, // exclusive handle is not
+            LKitType::HeapOwner(_) => false,
         }
     }
 }
@@ -140,6 +148,6 @@ pub fn ty_size(ty: &LKitType, structs: &HashMap<String, StructDef>) -> usize {
             .unwrap_or(0),
         LKitType::Function { .. } => 8, // pointer
         LKitType::Ref(_) | LKitType::StrictRef(_) => 8,
-
+        LKitType::HeapOwner(_) => 8, // always pointer sized
     }
 }

@@ -81,6 +81,12 @@ impl<'ctx> Compiler<'ctx> {
                     let pointee_ty = self.type_str_to_llvm(&pointee_type_name);
                     self.builder.build_load(pointee_ty, val.into_pointer_value(), &name)
                         .map_err(|e| e.to_string())
+                } else if slot.type_name.ends_with('*') {
+                    // heap owner — auto-deref
+                    let pointee_type_name = slot.type_name.trim_end_matches('*').trim().to_string();
+                    let pointee_ty = self.type_str_to_llvm(&pointee_type_name);
+                    self.builder.build_load(pointee_ty, val.into_pointer_value(), &name)
+                        .map_err(|e| e.to_string())
                 } else {
                     Ok(val)
                 }
@@ -94,6 +100,49 @@ impl<'ctx> Compiler<'ctx> {
                 Ok(val)
             }, 
             
+            Expr::Cast { target_type, expr } => {
+                let val = self.compile_expression(*expr)?;
+                let target_ty = self.type_str_to_llvm(&target_type);
+                
+                match (val, target_ty) {
+                    // ptr -> ptr (T* to U*, ptr to T*, etc.) — just bitcast
+                    (BasicValueEnum::PointerValue(p), BasicTypeEnum::PointerType(_)) => {
+                        Ok(p.as_basic_value_enum()) // opaque pointers, no-op in LLVM 15+
+                    }
+                    // int -> ptr
+                    (BasicValueEnum::IntValue(i), BasicTypeEnum::PointerType(t)) => {
+                        Ok(self.builder.build_int_to_ptr(i, t, "cast")
+                            .map_err(|e| e.to_string())?
+                            .as_basic_value_enum())
+                    }
+                    // ptr -> int
+                    (BasicValueEnum::PointerValue(p), BasicTypeEnum::IntType(t)) => {
+                        Ok(self.builder.build_ptr_to_int(p, t, "cast")
+                            .map_err(|e| e.to_string())?
+                            .as_basic_value_enum())
+                    }
+                    // int -> int (truncate or extend)
+                    (BasicValueEnum::IntValue(i), BasicTypeEnum::IntType(t)) => {
+                        Ok(self.builder.build_int_cast(i, t, "cast")
+                            .map_err(|e| e.to_string())?
+                            .as_basic_value_enum())
+                    }
+                    // float -> int
+                    (BasicValueEnum::FloatValue(f), BasicTypeEnum::IntType(t)) => {
+                        Ok(self.builder.build_float_to_signed_int(f, t, "cast")
+                            .map_err(|e| e.to_string())?
+                            .as_basic_value_enum())
+                    }
+                    // int -> float
+                    (BasicValueEnum::IntValue(i), BasicTypeEnum::FloatType(t)) => {
+                        Ok(self.builder.build_signed_int_to_float(i, t, "cast")
+                            .map_err(|e| e.to_string())?
+                            .as_basic_value_enum())
+                    }
+                    (v, t) => Err(format!("Cannot cast {:?} to {:?}", v.get_type(), t)),
+                }
+            }
+
            Expr::Unary { op, operand } => {
                 let val = self.compile_expression(*operand)?;
                 match op {
@@ -261,8 +310,8 @@ impl<'ctx> Compiler<'ctx> {
                     .trim()
                     .to_string();
 
-                // if it's a handle, load the pointer first
-                let struct_ptr = if slot.is_ref {
+                // if it's a handle or an owner, load the pointer first
+                let struct_ptr = if slot.is_ref || slot.type_name.ends_with('*') {
                     self.builder.build_load(
                         self.context.ptr_type(AddressSpace::default()),
                         slot.ptr,
@@ -868,7 +917,10 @@ impl<'ctx> Compiler<'ctx> {
             "Ptr" => self.context.ptr_type(AddressSpace::default()).into(),
             other if other.ends_with('&') => {
                 self.context.ptr_type(AddressSpace::default()).into()
-            }  
+            } 
+            other if other.ends_with('*') && !other.ends_with("strict&") => {
+                self.context.ptr_type(AddressSpace::default()).into()
+            }
             other if other.starts_with('[') => {
                 // [T] — dynamic slice: { ptr, i64 len, i64 cap }
                 let i64_ty = self.context.i64_type();
@@ -912,6 +964,13 @@ impl<'ctx> Compiler<'ctx> {
                     let handle_val = self.builder.build_load(slot.ty, slot.ptr, name)
                         .map_err(|e| e.to_string())?;
                     Ok((handle_val.into_pointer_value(), slot.ty))
+                } else if slot.type_name.ends_with('*') {
+                    // heap owner — write through pointer
+                    let val = self.builder.build_load(slot.ty, slot.ptr, &name)
+                        .map_err(|e| e.to_string())?;
+                    let pointee_name = slot.type_name.trim_end_matches('*').trim().to_string();
+                    let pointee_ty = self.type_str_to_llvm(&pointee_name);
+                    Ok((val.into_pointer_value(), pointee_ty))
                 } else {
                     Ok((slot.ptr, slot.ty))
                 }
@@ -926,7 +985,7 @@ impl<'ctx> Compiler<'ctx> {
                     .ok_or_else(|| format!("Undefined variable '{}'", var_name))?;
 
                 // deref handle if needed
-                let struct_ptr = if slot.is_ref {
+                let struct_ptr = if slot.is_ref || slot.type_name.ends_with('*') {
                     let handle_val = self.builder.build_load(
                         self.context.ptr_type(AddressSpace::default()),
                         slot.ptr,
@@ -1023,18 +1082,39 @@ impl<'ctx> Compiler<'ctx> {
         .collect();
 
         for (type_name, ptr) in to_dinit {
+            let is_heap = type_name.ends_with('*');
             let struct_name = type_name
                 .trim_end_matches('&')
                 .trim_end_matches("strict")
                 .trim()
                 .to_string();
+             let heap_ptr = if is_heap {
+                Some(self.builder.build_load(
+                    self.context.ptr_type(AddressSpace::default()),
+                    ptr,
+                    "heap_ptr"
+                ).map_err(|e| e.to_string())?.into_pointer_value())
+            } else {
+                None
+            };
             if let Some(extend) = self.extends.get(&struct_name).cloned() {
                 if let Some(dinit_name) = extend.dinit_fn {
+                    let target = heap_ptr.unwrap_or(ptr);
                     if let Some(dinit_fn) = self.module.get_function(&dinit_name) {
-                        self.builder.build_call(dinit_fn, &[ptr.into()], "")
+                        self.builder.build_call(dinit_fn, &[target.into()], "")
                             .map_err(|e| e.to_string())?;
                     }
                 }
+            }
+            if is_heap {
+                let free_fn = self.module.get_function("free").unwrap_or_else(|| {
+                    let ty = self.context.void_type().fn_type(
+                        &[self.context.ptr_type(AddressSpace::default()).into()], false
+                    );
+                    self.module.add_function("free", ty, Some(inkwell::module::Linkage::External))
+                });
+                self.builder.build_call(free_fn, &[heap_ptr.unwrap().into()], "")
+                    .map_err(|e| e.to_string())?;
             }
         }
         Ok(())
