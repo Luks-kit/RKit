@@ -1,4 +1,4 @@
-# LKit Language Design Document
+# LKit ( __L__east Dumb Tool__Kit__)
 
 LKit is a statically typed, compiled language targeting native code via LLVM.
 There are multiple implementations: **rkit** (Rust), **CKit** (C), and **PyKit** (Python).
