@@ -1,5 +1,5 @@
-use std::collections::HashMap;
-use crate::ast::{Expr, Stmt, ExtendItem};
+use std::collections::{HashSet, HashMap};
+use crate::ast::{Expr, Stmt, ExtendItem, ToolMethod};
 use crate::types::LKitType;
 use crate::value::Value;
 use crate::lexer::TokenType;
@@ -37,6 +37,8 @@ pub struct TypeChecker {
     current_return_type: Option<LKitType>,
     pub modules: HashMap<String, Vec<Stmt>>,
     pub module_exports: HashMap<String, HashMap<String, LKitType>>,
+    pub tools: HashMap<String, Vec<ToolMethod>>,  // tool name -> method sigs
+    pub implementations: HashMap<String, HashSet<String>>,  // type -> set of tools it implements
     pub errors: Vec<TypeError>,
     borrow_state: HashMap<String, (usize, bool)>,
 }
@@ -51,6 +53,8 @@ impl TypeChecker {
             current_return_type: None,
             modules: HashMap::new(),
             module_exports: HashMap::new(),
+            tools: HashMap::new(),
+            implementations: HashMap::new(),
             errors: Vec::new(),
             borrow_state: HashMap::new(),
         }
@@ -70,8 +74,13 @@ impl TypeChecker {
                     fields: typed_fields,
                 });
             }
+            // register tools
+            if let Stmt::Tool { name, methods } = stmt {
+                self.tools.insert(name.clone(), methods.clone());
+            }
         }
-        // First pass: register all function calls
+
+        // First pass: register all function signatures and externs
         for stmt in stmts {
             if let Stmt::Function { name, params, return_type, .. } = stmt {
                 let param_types = params.iter()
@@ -96,8 +105,8 @@ impl TypeChecker {
                 });
             }
         }
-        
-        // second pass: register extend blocks
+
+        // Second pass: register extend and extend-with blocks
         for stmt in stmts {
             if let Stmt::Extend { type_name, items } = stmt {
                 let mut def = ExtendDef {
@@ -131,9 +140,66 @@ impl TypeChecker {
                 }
                 self.extends.insert(type_name.clone(), def);
             }
+
+            if let Stmt::ExtendWith { type_name, tool_name, items } = stmt {
+                // validate tool exists
+                if !self.tools.contains_key(tool_name) {
+                    self.errors.push(TypeError::new(format!(
+                        "Unknown tool '{}'", tool_name
+                    )));
+                    continue;
+                }
+
+                // validate all tool methods are implemented
+                let tool_methods = self.tools.get(tool_name).cloned().unwrap();
+                let implemented: HashSet<String> = items.iter()
+                    .filter_map(|item| match item {
+                        ExtendItem::Method { name, .. } => Some(name.clone()),
+                        _ => None,
+                    })
+                    .collect();
+
+                for tool_method in &tool_methods {
+                    if !implemented.contains(&tool_method.name) {
+                        self.errors.push(TypeError::new(format!(
+                            "'{}' does not implement '{}' required by tool '{}'",
+                            type_name, tool_method.name, tool_name
+                        )));
+                    }
+                }
+
+                // register implementation
+                self.implementations
+                    .entry(type_name.clone())
+                    .or_insert_with(HashSet::new)
+                    .insert(tool_name.clone());
+
+                // merge methods into extend def
+                let mut def = self.extends.get(type_name).cloned()
+                    .unwrap_or(ExtendDef {
+                        init_params: None,
+                        has_dinit: false,
+                        methods: HashMap::new(),
+                    });
+                for item in items {
+                    if let ExtendItem::Method { name, params, return_type, .. } = item {
+                        let param_types = params.iter()
+                            .filter_map(|(_, ty)| LKitType::from_str(ty))
+                            .collect();
+                        let ret = LKitType::from_str(return_type)
+                            .unwrap_or(LKitType::Void);
+                        def.methods.insert(name.clone(), MethodSig {
+                            params: param_types,
+                            ret,
+                        });
+                    }
+                }
+                self.extends.insert(type_name.clone(), def);
+            }
         }
     }
-    
+
+
     pub fn check(&mut self, stmts: &[Stmt]) {
         // check everything
         for stmt in stmts {
@@ -371,6 +437,44 @@ impl TypeChecker {
             Stmt::Extern { .. } => {} // already registered in first pass
             Stmt::Struct { .. } => {} // already registered
             Stmt::Import { .. } => {} // imports done early
+            Stmt::Tool { .. } => {}
+            Stmt::ExtendWith { type_name, tool_name, items } => {
+                // validate type exists
+                if !self.structs.contains_key(type_name) {
+                    self.errors.push(TypeError::new(format!(
+                        "Cannot extend unknown type '{}'", type_name
+                    )));
+                    return;
+                }
+
+                // validate tool exists
+                if !self.tools.contains_key(tool_name) {
+                    self.errors.push(TypeError::new(format!(
+                        "Unknown tool '{}'", tool_name
+                    )));
+                    return;
+                }
+
+                // type check each method body
+                for item in items {
+                    if let ExtendItem::Method { name: _, params, return_type, body } = item {
+                        self.push_scope();
+                        for (p_name, p_type) in params {
+                            if let Some(ty) = LKitType::from_str(p_type) {
+                                self.define(p_name, ty);
+                            }
+                        }
+                        let ret = LKitType::from_str(return_type).unwrap_or(LKitType::Void);
+                        self.current_return_type = Some(ret);
+                        for s in body {
+                            self.check_stmt(s);
+                        }
+                        self.current_return_type = None;
+                        self.pop_scope();
+                    }
+                }
+            }
+
         }
     }
 
@@ -1002,6 +1106,13 @@ impl TypeChecker {
             state.1 = true;
             Ok(())
         }
+    }
+
+    pub fn implements(&self, type_name: &str, tool_name: &str) -> bool {
+        self.implementations
+            .get(type_name)
+            .map(|tools| tools.contains(tool_name))
+            .unwrap_or(false)
     }
 
 }

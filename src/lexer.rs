@@ -8,6 +8,8 @@ pub enum TokenType {
     Extern, Struct, Len, Cast, 
     Extend, Init, Dinit,
     Strict, Import,
+    Tool,
+    With,
     // Literals & Identifiers
     Identifier(String),
     Literal(Value),
@@ -17,7 +19,8 @@ pub enum TokenType {
     EqualEqual, NotEqual,
     Amp, Pipe, AmpAmp, PipePipe,
     Less, Greater, LessEqual, GreaterEqual,
-    LParen, RParen, LBrace, RBrace, LBracket, RBracket,
+    LParen, RParen, 
+    LBrace, RBrace, LBracket, RBracket,
     Semicolon, Colon, Comma, Dot, Variadic,
     
     EOF,
@@ -206,6 +209,8 @@ impl<'a> Lexer<'a> {
             "byte" => TokenType::Byte,
             "struct" => TokenType::Struct,
             "strict" => TokenType::Strict,
+            "tool" => TokenType::Tool,
+            "with" => TokenType::With,
             "import" => TokenType::Import,
             "cast" => TokenType::Cast,
             "extend" => TokenType::Extend,

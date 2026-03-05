@@ -1,5 +1,5 @@
 use crate::lexer::{Token, TokenType};
-use crate::ast::{Expr, Stmt, ExtendItem};
+use crate::ast::{Expr, Stmt, ExtendItem, ToolMethod};
 use crate::value::Value;
 
 #[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
@@ -46,6 +46,7 @@ impl Parser {
             TokenType::Extern => self.extern_declaration(),
             TokenType::Struct => self.struct_declaration(),
             TokenType::Identifier(_) if self.is_var_declaration() => self.var_declaration(),
+            TokenType::Tool => self.tool_declaration(),
             TokenType::Extend => self.extend_declaration(),
             _ => self.statement(),
         }
@@ -164,10 +165,61 @@ impl Parser {
         Stmt::Struct { name, fields }
     }
     
+    fn tool_declaration(&mut self) -> Stmt {
+        self.advance(); // consume 'tool'
+        let name = if let TokenType::Identifier(n) = self.consume_ident() { n }
+            else { panic!("Expected tool name"); };
+        self.consume(TokenType::LBrace, "Expect '{' after tool name.");
+
+        let mut methods = Vec::new();
+        while !self.check(&TokenType::RBrace) && !self.is_at_end() {
+            self.consume(TokenType::Fn, "Expect 'fn' in tool body.");
+            let return_type = self.parse_type();
+            let method_name = if let TokenType::Identifier(n) = self.consume_ident() { n }
+                else { panic!("Expected method name in tool"); };
+            self.consume(TokenType::LParen, "Expect '(' after method name.");
+            let mut params = Vec::new();
+            if !self.check(&TokenType::RParen) {
+                loop {
+                    let p_type = self.parse_type();
+                    let p_name = if let TokenType::Identifier(n) = self.consume_ident() { n }
+                        else { panic!("Expected param name"); };
+                    params.push((p_name, p_type));
+                    if !self.check(&TokenType::Comma) { break; }
+                    self.advance();
+                }
+            }
+            self.consume(TokenType::RParen, "Expect ')' after params.");
+            self.consume(TokenType::Semicolon, "Expect ';' after tool method signature.");
+            methods.push(ToolMethod { name: method_name, params, return_type });
+        }
+        self.consume(TokenType::RBrace, "Expect '}' after tool body.");
+        Stmt::Tool { name, methods }
+    }
+
     fn extend_declaration(&mut self) -> Stmt {
         self.advance(); // consume 'extend'
         let type_name = if let TokenType::Identifier(n) = self.consume_ident() { n }
             else { panic!("Expected type name after 'extend'"); };
+        
+        if self.check(&TokenType::With) {
+            self.advance(); // consume 'with'
+            let tool_name = if let TokenType::Identifier(n) = self.consume_ident() { n }
+                else { panic!("Expected tool name after 'with'"); };
+            self.consume(TokenType::LBrace, "Expect '{' after tool name.");
+            let mut items = Vec::new();
+            while !self.check(&TokenType::RBrace) && !self.is_at_end() {
+                let item = match self.peek().clone() {
+                    TokenType::Fn => self.parse_method(),
+                    _ => panic!("[line {}] Expected fn in extend-with block", self.peek_line()),
+                };
+                items.push(item);
+            }
+            self.consume(TokenType::RBrace, "Expect '}' after extend-with block.");
+            return Stmt::ExtendWith { type_name, tool_name, items };
+        }
+
+
         self.consume(TokenType::LBrace, "Expect '{' after type name.");
 
         let mut items = Vec::new();

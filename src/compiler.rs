@@ -663,8 +663,6 @@ impl<'ctx> Compiler<'ctx> {
                         }
                     }
                 }
-
-
                 // Restore outer scope
                 self.variables = outer_vars;
                 Ok(())
@@ -928,6 +926,80 @@ impl<'ctx> Compiler<'ctx> {
 
             Stmt::LetDecl { .. } => unreachable!("LetDecl should be folded by type checker"),
             Stmt::Import { .. } => Ok(()),
+            Stmt::Tool { .. } => Ok(()),  // no codegen needed
+
+            Stmt::ExtendWith { type_name, tool_name: _, items } => {
+                // compile exactly like Stmt::Extend methods
+                // reuse the same extend compilation logic
+                let mut compiled = self.extends.get(&type_name).cloned()
+                    .unwrap_or(CompiledExtend {
+                        init_fn: None,
+                        dinit_fn: None,
+                        methods: HashMap::new(),
+                    });
+
+                for item in items {
+                    if let ExtendItem::Method { name, params, return_type, body } = item {
+                        let method_name = format!("{}_{}", type_name, name);
+                        compiled.methods.insert(name.clone(), method_name.clone());
+
+                        let param_types: Vec<BasicMetadataTypeEnum> = params.iter()
+                            .map(|(_, ty)| self.type_str_to_llvm(ty).into())
+                            .collect();
+
+                        let ret_ty = match return_type.as_str() {
+                            "Int"   => self.context.i64_type().fn_type(&param_types, false),
+                            "Float" => self.context.f64_type().fn_type(&param_types, false),
+                            "Bool"  => self.context.bool_type().fn_type(&param_types, false),
+                            "Str"   => self.context.ptr_type(AddressSpace::default()).fn_type(&param_types, false),
+                            "Void"  => self.context.void_type().fn_type(&param_types, false),
+                            other   => self.type_str_to_llvm(other).fn_type(&param_types, false),
+                        };
+
+                        let function = self.module.add_function(&method_name, ret_ty, None);
+                        let entry = self.context.append_basic_block(function, "entry");
+                        self.builder.position_at_end(entry);
+
+                        let outer_vars = std::mem::take(&mut self.variables);
+                        self.variables = vec![HashMap::new()];
+
+                        for (i, (p_name, p_type)) in params.iter().enumerate() {
+                            let ty = self.type_str_to_llvm(p_type);
+                            let is_ref = p_type.ends_with('&');
+                            let alloca = self.builder.build_alloca(ty, p_name)
+                                .map_err(|e| e.to_string())?;
+                            let param_val = function.get_nth_param(i as u32)
+                                .ok_or_else(|| format!("Missing param {}", i))?;
+                            self.builder.build_store(alloca, param_val)
+                                .map_err(|e| e.to_string())?;
+                            self.define_var(p_name.clone(), VarSlot {
+                                ptr: alloca,
+                                ty,
+                                is_ref,
+                                type_name: p_type.clone(),
+                            });
+                        }
+
+                        for s in body {
+                            self.compile_statement(s)?;
+                        }
+
+                        if return_type == "Void" {
+                            if self.builder.get_insert_block()
+                                .unwrap().get_terminator().is_none() {
+                                self.builder.build_return(None)
+                                    .map_err(|e| e.to_string())?;
+                            }
+                        }
+
+                        self.variables = outer_vars;
+                    }
+                }
+
+                self.extends.insert(type_name, compiled);
+                Ok(())
+            }
+
         }
     }
     

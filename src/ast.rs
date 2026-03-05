@@ -19,6 +19,14 @@ pub enum ExtendItem {
 }
 
 #[derive(Debug, Clone)]
+pub struct ToolMethod {
+    pub name: String,
+    pub params: Vec<(String, String)>,  // (name, type) — no 'this', added implicitly
+    pub return_type: String,
+}
+
+
+#[derive(Debug, Clone)]
 pub enum Expr {
     Binary {
         left: Box<Expr>,
@@ -63,7 +71,8 @@ pub enum Expr {
     Cast {
         target_type: String,
         expr: Box<Expr>,
-    }
+    },
+   
 }
 
 #[derive(Debug, Clone)]
@@ -111,6 +120,15 @@ pub enum Stmt {
     },
     Extend {
         type_name: String,
+        items: Vec<ExtendItem>,
+    },
+    Tool {
+        name: String,
+        methods: Vec<ToolMethod>,
+    },
+    ExtendWith {
+        type_name: String,
+        tool_name: String,
         items: Vec<ExtendItem>,
     },
 }
