@@ -1,5 +1,5 @@
-use crate::lexer::{Token, TokenType};
-use crate::ast::{Expr, Stmt, ExtendItem, ToolMethod};
+use crate::lexer::{Token, TokenType, Span};
+use crate::ast::{Expr, Stmt, ExprKind, StmtKind, ExtendItem, ToolMethod};
 use crate::value::Value;
 
 #[derive(Debug, PartialEq, PartialOrd, Clone, Copy)]
@@ -57,11 +57,12 @@ impl Parser {
         let name = if let TokenType::Identifier(n) = self.consume_ident() { n }
             else { panic!("Expected module name after 'import'"); };
         self.consume(TokenType::Semicolon, "Expect ';' after import.");
-        Stmt::Import { module_name: name }
+        Stmt::new( StmtKind::Import { module_name: name }, self.current_span() )
     
     }
 
     fn var_declaration(&mut self) -> Stmt {
+        let span = self.current_span();
         let value_type = self.parse_type();
         let name = if 
             let TokenType::Identifier(n) = self.consume_ident() 
@@ -71,10 +72,11 @@ impl Parser {
         let initializer = self.expression();
         self.consume(TokenType::Semicolon, "Expect ';' after variable declaration.");
 
-        Stmt::VarDecl { name, value_type, initializer }
+        Stmt::new(StmtKind::VarDecl { name, value_type, initializer }, span)
     }
 
     fn fn_declaration(&mut self) -> Stmt {
+        let span = self.current_span();
         self.advance(); // consume 'fn'
         // Simplified: assuming 'fn type name(...)'
         let ret_type = self.parse_type();
@@ -109,10 +111,12 @@ impl Parser {
         self.consume(TokenType::LBrace, "Expect '{' before body.");
         let body = self.block();
         
-        Stmt::Function { name, params: params, return_type: ret_type, body }
+        Stmt::new(StmtKind::Function { name, params, return_type: ret_type, body }, span )
+
     }
-    
+
     fn extern_declaration(&mut self) -> Stmt {
+        let span = self.current_span();
         self.advance(); // consume 'extern'
         self.consume(TokenType::Fn, "Expect 'fn' after 'extern'.");
         
@@ -144,10 +148,11 @@ impl Parser {
         self.consume(TokenType::RParen, "Expect ')' after params.");
         self.consume(TokenType::Semicolon, "Expect ';' after extern declaration.");
         
-        Stmt::Extern { name, params, return_type: ret_type, variadic }
+        Stmt::new(StmtKind::Extern { name, params, return_type: ret_type, variadic }, span)
     }
 
     fn struct_declaration(&mut self) -> Stmt {
+        let span = self.current_span();
         self.advance(); // consume 'struct'
         let name = if let TokenType::Identifier(n) = self.consume_ident() { n }
             else { panic!("Expected struct name"); };
@@ -162,10 +167,11 @@ impl Parser {
             fields.push((field_name, field_type));
         }
         self.consume(TokenType::RBrace, "Expect '}' after struct body.");
-        Stmt::Struct { name, fields }
+        Stmt::new(StmtKind::Struct { name, fields }, span)
     }
     
     fn tool_declaration(&mut self) -> Stmt {
+        let span = self.current_span();
         self.advance(); // consume 'tool'
         let name = if let TokenType::Identifier(n) = self.consume_ident() { n }
             else { panic!("Expected tool name"); };
@@ -194,10 +200,11 @@ impl Parser {
             methods.push(ToolMethod { name: method_name, params, return_type });
         }
         self.consume(TokenType::RBrace, "Expect '}' after tool body.");
-        Stmt::Tool { name, methods }
+        Stmt::new(StmtKind::Tool { name, methods }, span)
     }
 
     fn extend_declaration(&mut self) -> Stmt {
+        let span = self.current_span();
         self.advance(); // consume 'extend'
         let type_name = if let TokenType::Identifier(n) = self.consume_ident() { n }
             else { panic!("Expected type name after 'extend'"); };
@@ -216,7 +223,7 @@ impl Parser {
                 items.push(item);
             }
             self.consume(TokenType::RBrace, "Expect '}' after extend-with block.");
-            return Stmt::ExtendWith { type_name, tool_name, items };
+            return Stmt::new(StmtKind::ExtendWith { type_name, tool_name, items }, span);
         }
 
 
@@ -233,7 +240,7 @@ impl Parser {
             items.push(item);
         }
         self.consume(TokenType::RBrace, "Expect '}' after extend block.");
-        Stmt::Extend { type_name, items }
+        Stmt::new(StmtKind::Extend { type_name, items }, span)
     }
 
     fn parse_init(&mut self) -> ExtendItem {
@@ -287,32 +294,34 @@ impl Parser {
     }
 
     fn statement(&mut self) -> Stmt {
+        let span = self.current_span();
         match self.peek() {
             TokenType::If => self.if_statement(),
             TokenType::While => self.while_statement(),
             TokenType::LBrace => {
                 self.advance();
-                Stmt::Block(self.block())
+                Stmt::new(StmtKind::Block(self.block()), span)
             },
             TokenType::Return => {
                 self.advance(); // consume 'return
                 if self.check(&TokenType::Semicolon) {
                     self.advance();
-                    return Stmt::Return(Expr::Literal(Value::Null));
+                    return Stmt::new(StmtKind::Return(Expr::new(ExprKind::Literal(Value::Null), span.clone())), span);
                 }
                 let value = self.expression();
                 self.consume(TokenType::Semicolon, "Expect ';' after return value.");
-                Stmt::Return(value)
+                Stmt::new(StmtKind::Return(value), span)
             }
             _ => {
                 let expr = self.expression();
                 self.consume(TokenType::Semicolon, "Expected ';' after expression.");
-                Stmt::Expression(expr)
+                Stmt::new(StmtKind::Expression(expr), span)
             }
         }
     }
 
     fn if_statement(&mut self) -> Stmt {
+        let span = self.current_span();
         self.advance(); // consume 'if'
         self.consume(TokenType::LParen, "Expect '(' after 'if'.");
         let condition = self.expression();
@@ -326,14 +335,15 @@ impl Parser {
             else_branch = Some(Box::new(self.statement()));
         }
 
-        Stmt::If {
+        Stmt::new( StmtKind::If {
             condition,
             then_branch,
             else_branch,
-        }
+        }, span )
     }
 
     fn while_statement(&mut self) -> Stmt {
+        let span = self.current_span();
         self.advance(); // consume 'while'
         self.consume(TokenType::LParen, "Expect '(' after 'while'.");
         let condition = self.expression();
@@ -341,7 +351,7 @@ impl Parser {
         
         let body = Box::new(self.statement());
         
-        Stmt::While { condition, body }
+        Stmt::new(StmtKind::While { condition, body }, span)
     }
 
     fn block(&mut self) -> Vec<Stmt> {
@@ -561,6 +571,12 @@ impl Parser {
 
     fn peek(&self) -> &TokenType {
         &self.tokens[self.current].kind
+    }
+    
+    fn current_span(&self) -> Span {
+        self.tokens.get(self.current)
+            .map(|t| t.span.clone())
+            .unwrap_or(Span::new("", 0, 0))
     }
 
     fn peek_line(&self) -> usize {

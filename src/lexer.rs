@@ -30,36 +30,53 @@ use std::iter::Peekable;
 use std::str::Chars;
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct Span {
+    pub file: String,
+    pub line: usize,
+    pub col: usize,
+}
+
+impl Span {
+    pub fn new(file: &str, line: usize, col: usize) -> Self {
+        Span { file: file.to_string(), line, col }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct Token {
     pub kind: TokenType,
-    pub line: usize,
+    pub span: Span,
 }
 
 impl Token {
-    pub fn new(kind: TokenType, line: usize) -> Self {
-        Self { kind, line }
+    pub fn new(kind: TokenType, span: Span) -> Self {
+        Self { kind, span }
     }
 }
 
 pub struct Lexer<'a> {
     input: Peekable<Chars<'a>>,
-    pub line: usize,
+    line: usize,
+    col: usize,
+    file: String,
 }
 
 impl<'a> Lexer<'a> {
-    pub fn new(input: &'a str) -> Self {
+    pub fn new(source: &'a str, file: &'a str) -> Self {
         Self {
-            input: input.chars().peekable(),
+            input: source.chars().peekable(),
             line: 1,
+            col: 1,
+            file: file.to_string() 
         }
     }
 
     // Helper to consume whitespace
     fn skip_whitespace(&mut self) {
         while let Some(&c) = self.input.peek() {
-            if c == '\n' { self.line += 1; }
+            if c == '\n' { self.line += 1; self.col += 1; }
             if c.is_whitespace() {
-                self.input.next();
+                self.input.next(); self.col += 1;
             } else {
                 break;
             }
@@ -68,10 +85,14 @@ impl<'a> Lexer<'a> {
 
     pub fn next_token(&mut self) -> Token {
         self.skip_whitespace();
+        let start_col = self.col;
+        let start_line = self.line;
 
         let c = match self.input.next() {
             Some(c) => c,
-            None => return Token::new(TokenType::EOF, self.line),
+            None => return Token::new(
+                TokenType::EOF, 
+                Span::new(&self.file, start_line, start_col)),
         };
 
         let kind = match c {
@@ -181,7 +202,7 @@ impl<'a> Lexer<'a> {
             _ if c.is_alphabetic() => self.read_identifier(c),
             _ => TokenType::EOF, // Should probably be an Error type later
         };
-        Token::new(kind, self.line)
+        Token::new(kind, Span::new(&self.file, start_line, start_col))
     }
 }
 

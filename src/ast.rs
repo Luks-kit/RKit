@@ -1,5 +1,5 @@
 use crate::value::Value;
-use crate::lexer::TokenType;
+use crate::lexer::{TokenType, Span};
 
 #[derive(Debug, Clone)]
 pub enum ExtendItem {
@@ -26,8 +26,9 @@ pub struct ToolMethod {
 }
 
 
+
 #[derive(Debug, Clone)]
-pub enum Expr {
+pub enum ExprKind {
     Binary {
         left: Box<Expr>,
         op: TokenType,
@@ -77,7 +78,7 @@ pub enum Expr {
 
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
-pub enum Stmt {
+pub enum StmtKind {
     Expression(Expr),
     VarDecl {
         name: String,
@@ -131,4 +132,28 @@ pub enum Stmt {
         tool_name: String,
         items: Vec<ExtendItem>,
     },
+}
+
+#[derive(Debug, Clone)]
+pub struct Expr {
+    pub kind: ExprKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct Stmt {
+    pub kind: StmtKind,
+    pub span: Span,
+}
+
+impl Expr {
+    pub fn new(kind: ExprKind, span: Span) -> Self {
+        Expr { kind, span }
+    }
+}
+
+impl Stmt {
+    pub fn new(kind: StmtKind, span: Span) -> Self {
+        Stmt { kind, span }
+    }
 }

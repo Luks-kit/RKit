@@ -2,19 +2,24 @@ use std::collections::{HashSet, HashMap};
 use crate::ast::{Expr, Stmt, ExtendItem, ToolMethod};
 use crate::types::LKitType;
 use crate::value::Value;
-use crate::lexer::TokenType;
+use crate::lexer::{Span, TokenType};
 use crate::types::StructDef;
 
 #[derive(Debug)]
 pub struct TypeError {
     pub message: String,
+    pub span: Option<Span>,
 }
 
 impl TypeError {
-    fn new(msg: impl Into<String>) -> Self {
-        Self { message: msg.into() }
+    pub fn new(message: impl Into<String>) -> Self {
+        TypeError { message: message.into(), span: None }
+    }
+    pub fn with_span(message: impl Into<String>, span: Span) -> Self {
+        TypeError { message: message.into(), span: Some(span) }
     }
 }
+
 
 #[derive(Debug, Clone)]
 pub struct MethodSig {
