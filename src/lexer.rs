@@ -3,26 +3,62 @@ use crate::value::Value;
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenType {
     // Keywords
-    Fn, Int, Str, Float, Bool, Void, Ptr, Byte,
-    Return, If, Else, While,
-    Extern, Struct, Len, Cast, 
-    Extend, Init, Dinit,
-    Strict, Import,
+    Fn,
+    Int,
+    Str,
+    Float,
+    Bool,
+    Void,
+    Ptr,
+    Byte,
+    Return,
+    If,
+    Else,
+    While,
+    Extern,
+    Struct,
+    Len,
+    Cast,
+    Extend,
+    Init,
+    Dinit,
+    Strict,
+    Import,
     Tool,
     With,
     // Literals & Identifiers
     Identifier(String),
     Literal(Value),
-    
+
     // Operators & Punctuation
-    Plus, Minus, Star, Slash, Not, Equal,
-    EqualEqual, NotEqual,
-    Amp, Pipe, AmpAmp, PipePipe,
-    Less, Greater, LessEqual, GreaterEqual,
-    LParen, RParen, 
-    LBrace, RBrace, LBracket, RBracket,
-    Semicolon, Colon, Comma, Dot, Variadic,
-    
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Not,
+    Equal,
+    EqualEqual,
+    NotEqual,
+    Amp,
+    Pipe,
+    AmpAmp,
+    PipePipe,
+    Less,
+    Greater,
+    LessEqual,
+    GreaterEqual,
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    LBracket,
+    RBracket,
+    Semicolon,
+    Colon,
+    Comma,
+    Dot,
+    Variadic,
+
     EOF,
 }
 
@@ -38,7 +74,11 @@ pub struct Span {
 
 impl Span {
     pub fn new(file: &str, line: usize, col: usize) -> Self {
-        Span { file: file.to_string(), line, col }
+        Span {
+            file: file.to_string(),
+            line,
+            col,
+        }
     }
 }
 
@@ -62,21 +102,35 @@ pub struct Lexer<'a> {
 }
 
 impl<'a> Lexer<'a> {
+    fn error_here(&self, message: impl AsRef<str>) -> ! {
+        panic!(
+            "{}:{}:{}: {}",
+            self.file,
+            self.line,
+            self.col,
+            message.as_ref()
+        );
+    }
+
     pub fn new(source: &'a str, file: &'a str) -> Self {
         Self {
             input: source.chars().peekable(),
             line: 1,
             col: 1,
-            file: file.to_string() 
+            file: file.to_string(),
         }
     }
 
     // Helper to consume whitespace
     fn skip_whitespace(&mut self) {
         while let Some(&c) = self.input.peek() {
-            if c == '\n' { self.line += 1; self.col += 1; }
+            if c == '\n' {
+                self.line += 1;
+                self.col += 1;
+            }
             if c.is_whitespace() {
-                self.input.next(); self.col += 1;
+                self.input.next();
+                self.col += 1;
             } else {
                 break;
             }
@@ -90,13 +144,16 @@ impl<'a> Lexer<'a> {
 
         let c = match self.input.next() {
             Some(c) => c,
-            None => return Token::new(
-                TokenType::EOF, 
-                Span::new(&self.file, start_line, start_col)),
+            None => {
+                return Token::new(TokenType::EOF, Span::new(&self.file, start_line, start_col));
+            }
         };
 
         let kind = match c {
-            '\n' => { self.line += 1; return self.next_token(); }
+            '\n' => {
+                self.line += 1;
+                return self.next_token();
+            }
             '(' => TokenType::LParen,
             ')' => TokenType::RParen,
             '{' => TokenType::LBrace,
@@ -105,14 +162,16 @@ impl<'a> Lexer<'a> {
             ',' => TokenType::Comma,
             '+' => TokenType::Plus,
             '-' => TokenType::Minus,
-            '*' => TokenType::Star,          
+            '*' => TokenType::Star,
             ':' => TokenType::Colon,
             '[' => TokenType::LBracket,
             ']' => TokenType::RBracket,
             '/' => {
                 if self.input.peek() == Some(&'/') {
                     while let Some(&c) = self.input.peek() {
-                        if c == '\n' { break; }
+                        if c == '\n' {
+                            break;
+                        }
                         self.input.next();
                     }
                     return self.next_token();
@@ -124,8 +183,10 @@ impl<'a> Lexer<'a> {
                                 self.input.next(); // consume '/'
                                 break;
                             }
-                            Some('\n') => { self.line += 1; }
-                            None => panic!("Unterminated block comment"),
+                            Some('\n') => {
+                                self.line += 1;
+                            }
+                            None => self.error_here("Unterminated block comment"),
                             _ => {}
                         }
                     }
@@ -148,7 +209,7 @@ impl<'a> Lexer<'a> {
                     TokenType::NotEqual
                 } else {
                     // For now, if it's just '!', we'll treat as error or add Not later
-                    TokenType::Not 
+                    TokenType::Not
                 }
             }
             '<' => {
@@ -174,7 +235,7 @@ impl<'a> Lexer<'a> {
                         self.input.next();
                         TokenType::Variadic
                     } else {
-                        panic!("Unexpected '..' — did you mean '...'?");
+                        self.error_here("Unexpected '..' — did you mean '...'?");
                     }
                 } else {
                     TokenType::Dot
@@ -235,8 +296,8 @@ impl<'a> Lexer<'a> {
             "import" => TokenType::Import,
             "cast" => TokenType::Cast,
             "extend" => TokenType::Extend,
-            "init"   => TokenType::Init,
-            "dinit"  => TokenType::Dinit,
+            "init" => TokenType::Init,
+            "dinit" => TokenType::Dinit,
             "if" => TokenType::If,
             "else" => TokenType::Else,
             "while" => TokenType::While,
@@ -251,7 +312,7 @@ impl<'a> Lexer<'a> {
     fn read_number(&mut self, first_char: char) -> TokenType {
         let mut number = String::from(first_char);
         let mut is_float = false;
-        
+
         while let Some(&c) = self.input.peek() {
             if c.is_ascii_digit() {
                 number.push(self.input.next().unwrap());
@@ -262,7 +323,7 @@ impl<'a> Lexer<'a> {
                 break;
             }
         }
-        
+
         if is_float {
             let val = number.parse::<f64>().unwrap_or(0.0);
             TokenType::Literal(Value::Float(val))
@@ -275,21 +336,26 @@ impl<'a> Lexer<'a> {
     fn read_string(&mut self) -> TokenType {
         let mut s = String::new();
         while let Some(c) = self.input.next() {
-            if c == '"' { break; }
+            if c == '"' {
+                break;
+            }
             if c == '\\' {
                 match self.input.next() {
-                    Some('n')  => s.push('\n'),
-                    Some('t')  => s.push('\t'),
-                    Some('r')  => s.push('\r'),
+                    Some('n') => s.push('\n'),
+                    Some('t') => s.push('\t'),
+                    Some('r') => s.push('\r'),
                     Some('\\') => s.push('\\'),
-                    Some('"')  => s.push('"'),
-                    Some(c)    => { s.push('\\'); s.push(c); }
-                    None       => break,
+                    Some('"') => s.push('"'),
+                    Some(c) => {
+                        s.push('\\');
+                        s.push(c);
+                    }
+                    None => break,
                 }
             } else {
                 s.push(c);
             }
-        } 
+        }
         TokenType::Literal(Value::Str(s))
     }
 }
