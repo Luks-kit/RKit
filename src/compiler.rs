@@ -1606,19 +1606,6 @@ impl<'ctx> Compiler<'ctx> {
                     }
                 }
             }
-            if is_heap {
-                let free_fn = self.module.get_function("free").unwrap_or_else(|| {
-                    let ty = self.context.void_type().fn_type(
-                        &[self.context.ptr_type(AddressSpace::default()).into()],
-                        false,
-                    );
-                    self.module
-                        .add_function("free", ty, Some(inkwell::module::Linkage::External))
-                });
-                self.builder
-                    .build_call(free_fn, &[heap_ptr.unwrap().into()], "")
-                    .map_err(|e| e.to_string())?;
-            }
         }
         Ok(())
     }
