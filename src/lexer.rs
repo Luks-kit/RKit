@@ -102,13 +102,24 @@ pub struct Lexer<'a> {
 }
 
 impl<'a> Lexer<'a> {
+    fn format_error_with_line(&self, line: usize, col: usize, message: &str) -> String {
+        let mut rendered = format!("{}:{}:{}: {}", self.file, line, col, message);
+        if let Ok(contents) = std::fs::read_to_string(&self.file) {
+            if let Some(src_line) = contents.lines().nth(line.saturating_sub(1)) {
+                rendered.push('\n');
+                rendered.push_str(src_line);
+                rendered.push('\n');
+                rendered.push_str(&" ".repeat(col.saturating_sub(1)));
+                rendered.push('^');
+            }
+        }
+        rendered
+    }
+
     fn error_here(&self, message: impl AsRef<str>) -> ! {
         panic!(
-            "{}:{}:{}: {}",
-            self.file,
-            self.line,
-            self.col,
-            message.as_ref()
+            "{}",
+            self.format_error_with_line(self.line, self.col, message.as_ref())
         );
     }
 

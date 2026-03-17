@@ -1,4 +1,4 @@
-use crate::ast::{Expr, ExtendItem, Stmt, ToolMethod};
+use crate::ast::{Expr, ExprKind, ExtendItem, Stmt, StmtKind, ToolMethod};
 use crate::lexer::{Span, TokenType};
 use crate::types::LKitType;
 use crate::types::StructDef;
@@ -73,7 +73,7 @@ impl TypeChecker {
     pub fn register_pass(&mut self, stmts: &[Stmt]) {
         // Zero'th pass: register all structs
         for stmt in stmts {
-            if let Stmt::Struct { name, fields } = stmt {
+            if let StmtKind::Struct { name, fields } = &stmt.kind {
                 let typed_fields = fields
                     .iter()
                     .filter_map(|(fname, ftype)| {
@@ -89,19 +89,19 @@ impl TypeChecker {
                 );
             }
             // register tools
-            if let Stmt::Tool { name, methods } = stmt {
+            if let StmtKind::Tool { name, methods } = &stmt.kind {
                 self.tools.insert(name.clone(), methods.clone());
             }
         }
 
         // First pass: register all function signatures and externs
         for stmt in stmts {
-            if let Stmt::Function {
+            if let StmtKind::Function {
                 name,
                 params,
                 return_type,
                 ..
-            } = stmt
+            } = &stmt.kind
             {
                 let param_types = params
                     .iter()
@@ -116,12 +116,12 @@ impl TypeChecker {
                     },
                 );
             }
-            if let Stmt::Extern {
+            if let StmtKind::Extern {
                 name,
                 params,
                 return_type,
                 ..
-            } = stmt
+            } = &stmt.kind
             {
                 let param_types = params
                     .iter()
@@ -140,7 +140,7 @@ impl TypeChecker {
 
         // Second pass: register extend and extend-with blocks
         for stmt in stmts {
-            if let Stmt::Extend { type_name, items } = stmt {
+            if let StmtKind::Extend { type_name, items } = &stmt.kind {
                 let mut def = ExtendDef {
                     init_params: None,
                     has_dinit: false,
@@ -182,11 +182,11 @@ impl TypeChecker {
                 self.extends.insert(type_name.clone(), def);
             }
 
-            if let Stmt::ExtendWith {
+            if let StmtKind::ExtendWith {
                 type_name,
                 tool_name,
                 items,
-            } = stmt
+            } = &stmt.kind
             {
                 // validate tool exists
                 if !self.tools.contains_key(tool_name) {
@@ -311,17 +311,19 @@ impl TypeChecker {
         None
     }
 
-    fn stmt_error(&mut self, _stmt: &Stmt, message: impl Into<String>) {
-        self.errors.push(TypeError::new(message));
+    fn stmt_error(&mut self, stmt: &Stmt, message: impl Into<String>) {
+        self.errors
+            .push(TypeError::with_span(message, stmt.span.clone()));
     }
 
-    fn expr_error(&mut self, _expr: &Expr, message: impl Into<String>) {
-        self.errors.push(TypeError::new(message));
+    fn expr_error(&mut self, expr: &Expr, message: impl Into<String>) {
+        self.errors
+            .push(TypeError::with_span(message, expr.span.clone()));
     }
 
     fn check_stmt(&mut self, stmt: &Stmt) {
-        match stmt {
-            Stmt::VarDecl {
+        match &stmt.kind {
+            StmtKind::VarDecl {
                 name,
                 value_type,
                 initializer,
@@ -352,9 +354,9 @@ impl TypeChecker {
                     _ => {}
                 }
                 // track referent for handle types
-                let referent = match initializer {
-                    Expr::Ref(inner) | Expr::StrictRef(inner) => match inner.as_ref() {
-                        Expr::Variable(n) => Some(n.clone()),
+                let referent = match &initializer.kind {
+                    ExprKind::Ref(inner) | ExprKind::StrictRef(inner) => match &inner.kind {
+                        ExprKind::Variable(n) => Some(n.clone()),
                         _ => None,
                     },
                     _ => None,
@@ -364,11 +366,11 @@ impl TypeChecker {
                     None => self.define(name, expected),
                 }
             }
-            Stmt::LetDecl { name, initializer } => match self.check_expr(initializer) {
+            StmtKind::LetDecl { name, initializer } => match self.check_expr(initializer) {
                 Some(ty) => {
-                    let referent = match initializer {
-                        Expr::Ref(inner) | Expr::StrictRef(inner) => match inner.as_ref() {
-                            Expr::Variable(n) => Some(n.clone()),
+                    let referent = match &initializer.kind {
+                        ExprKind::Ref(inner) | ExprKind::StrictRef(inner) => match &inner.kind {
+                            ExprKind::Variable(n) => Some(n.clone()),
                             _ => None,
                         },
                         _ => None,
@@ -381,7 +383,7 @@ impl TypeChecker {
                 None => self.stmt_error(stmt, format!("Cannot infer type for '{}'", name)),
             },
 
-            Stmt::Function {
+            StmtKind::Function {
                 name: _,
                 params,
                 return_type,
@@ -407,7 +409,7 @@ impl TypeChecker {
                 self.current_return_type = None;
             }
 
-            Stmt::Return(expr) => {
+            StmtKind::Return(expr) => {
                 let actual = self.check_expr(expr);
                 match &actual {
                     Some(LKitType::Ref(_)) | Some(LKitType::StrictRef(_)) => {
@@ -433,7 +435,7 @@ impl TypeChecker {
                 }
             }
 
-            Stmt::If {
+            StmtKind::If {
                 condition,
                 then_branch,
                 else_branch,
@@ -454,7 +456,7 @@ impl TypeChecker {
                 }
             }
 
-            Stmt::While { condition, body } => {
+            StmtKind::While { condition, body } => {
                 match self.check_expr(condition) {
                     Some(t) if t != LKitType::Bool => {
                         self.stmt_error(stmt, format!("While condition must be Bool, got {:?}", t));
@@ -466,7 +468,7 @@ impl TypeChecker {
                 self.pop_scope();
             }
 
-            Stmt::Block(stmts) => {
+            StmtKind::Block(stmts) => {
                 self.push_scope();
                 for s in stmts {
                     self.check_stmt(s);
@@ -474,7 +476,7 @@ impl TypeChecker {
                 self.pop_scope();
             }
 
-            Stmt::Extend { type_name, items } => {
+            StmtKind::Extend { type_name, items } => {
                 for item in items {
                     match item {
                         ExtendItem::Init { params, body } => {
@@ -527,15 +529,15 @@ impl TypeChecker {
                 }
             }
 
-            Stmt::Expression(expr) => {
+            StmtKind::Expression(expr) => {
                 self.check_expr(expr);
             }
 
-            Stmt::Extern { .. } => {} // already registered in first pass
-            Stmt::Struct { .. } => {} // already registered
-            Stmt::Import { .. } => {} // imports done early
-            Stmt::Tool { .. } => {}
-            Stmt::ExtendWith {
+            StmtKind::Extern { .. } => {} // already registered in first pass
+            StmtKind::Struct { .. } => {} // already registered
+            StmtKind::Import { .. } => {} // imports done early
+            StmtKind::Tool { .. } => {}
+            StmtKind::ExtendWith {
                 type_name,
                 tool_name,
                 items,
@@ -584,8 +586,8 @@ impl TypeChecker {
     }
 
     fn check_expr(&mut self, expr: &Expr) -> Option<LKitType> {
-        match expr {
-            Expr::Literal(val) => Some(match val {
+        match &expr.kind {
+            ExprKind::Literal(val) => Some(match val {
                 Value::Int(_) => LKitType::Int,
                 Value::Float(_) => LKitType::Float,
                 Value::Bool(_) => LKitType::Bool,
@@ -593,7 +595,7 @@ impl TypeChecker {
                 Value::Null => LKitType::Void,
             }),
 
-            Expr::Variable(name) => {
+            ExprKind::Variable(name) => {
                 match self.lookup(name) {
                     Some(ty) => match ty.clone() {
                         LKitType::Ref(inner) => Some(*inner),
@@ -608,10 +610,10 @@ impl TypeChecker {
                 }
             }
 
-            Expr::Assign { target, value } => {
+            ExprKind::Assign { target, value } => {
                 // 1. Determine the type of the assignment target
-                let target_ty = match target.as_ref() {
-                    Expr::Variable(name) => match self.lookup(name) {
+                let target_ty = match &target.kind {
+                    ExprKind::Variable(name) => match self.lookup(name) {
                         Some(LKitType::StrictRef(inner)) => *inner.clone(),
                         Some(LKitType::HeapOwner(inner)) => *inner.clone(),
                         Some(LKitType::Ref(_)) => {
@@ -628,7 +630,7 @@ impl TypeChecker {
                             return None;
                         }
                     },
-                    Expr::FieldAccess { object, field } => {
+                    ExprKind::FieldAccess { object, field } => {
                         let obj_ty = self.check_expr(object)?;
                         // unwrap handle, but reject shared handles
                         let base_ty = match obj_ty {
@@ -669,7 +671,7 @@ impl TypeChecker {
                             }
                         }
                     }
-                    Expr::Index { object, index: _ } => match self.check_expr(object)? {
+                    ExprKind::Index { object, index: _ } => match self.check_expr(object)? {
                         LKitType::Slice(inner, _) | LKitType::DynSlice(inner) => *inner,
                         other => {
                             self.errors.push(TypeError::new(format!(
@@ -705,7 +707,7 @@ impl TypeChecker {
                 }
             }
 
-            Expr::Unary { op, operand } => match op {
+            ExprKind::Unary { op, operand } => match op {
                 TokenType::Not => match self.check_expr(operand)? {
                     LKitType::Bool => Some(LKitType::Bool),
                     other => {
@@ -735,7 +737,7 @@ impl TypeChecker {
                 }
             },
 
-            Expr::Binary { left, op, right } => {
+            ExprKind::Binary { left, op, right } => {
                 let l = self.check_expr(left)?;
                 let r = self.check_expr(right)?;
 
@@ -775,9 +777,9 @@ impl TypeChecker {
                 }
             }
 
-            Expr::Call { callee, args } => {
-                let name = match callee.as_ref() {
-                    Expr::Variable(n) => n.clone(),
+            ExprKind::Call { callee, args } => {
+                let name = match &callee.kind {
+                    ExprKind::Variable(n) => n.clone(),
                     _ => {
                         self.errors
                             .push(TypeError::new("Only direct calls supported"));
@@ -836,12 +838,12 @@ impl TypeChecker {
                 }
             }
 
-            Expr::Cast { target_type, expr } => {
+            ExprKind::Cast { target_type, expr } => {
                 // still check the inner expression for undefined variables etc.
                 self.check_expr(expr);
                 LKitType::from_str(target_type)
             }
-            Expr::FieldAccess { object, field } => {
+            ExprKind::FieldAccess { object, field } => {
                 let obj_ty = self.check_expr(object)?;
                 // unwrap handle
                 let base_ty = match obj_ty {
@@ -878,7 +880,7 @@ impl TypeChecker {
                 }
             }
 
-            Expr::StructInit { name, fields } => {
+            ExprKind::StructInit { name, fields } => {
                 let def = match self.structs.get(name).cloned() {
                     Some(d) => d,
                     None => {
@@ -915,7 +917,7 @@ impl TypeChecker {
                 Some(LKitType::Struct(name.clone()))
             }
 
-            Expr::SliceLiteral(elements) => {
+            ExprKind::SliceLiteral(elements) => {
                 if elements.is_empty() {
                     self.errors
                         .push(TypeError::new("Cannot infer type of empty slice literal"));
@@ -937,14 +939,14 @@ impl TypeChecker {
                 Some(LKitType::Slice(Box::new(first), elements.len() as u64))
             }
 
-            Expr::Index { object, index } => {
+            ExprKind::Index { object, index } => {
                 let idx_ty = self.check_expr(index)?;
                 if idx_ty != LKitType::Int {
                     self.errors.push(TypeError::new("Slice index must be Int"));
                     return None;
                 }
 
-                if let Expr::Literal(Value::Int(n)) = index.as_ref() {
+                if let ExprKind::Literal(Value::Int(n)) = &index.kind {
                     if let Some(LKitType::Slice(inner, size)) = self.check_expr(object) {
                         if *n < 0 || *n as u64 >= size {
                             self.errors.push(TypeError::new(format!(
@@ -970,7 +972,7 @@ impl TypeChecker {
                 }
             }
 
-            Expr::Len(expr) => match self.check_expr(expr)? {
+            ExprKind::Len(expr) => match self.check_expr(expr)? {
                 LKitType::Slice(_, _) | LKitType::DynSlice(_) => Some(LKitType::Int),
                 other => {
                     self.errors.push(TypeError::new(format!(
@@ -980,8 +982,8 @@ impl TypeChecker {
                     None
                 }
             },
-            Expr::Ref(inner) => match inner.as_ref() {
-                Expr::Variable(name) => {
+            ExprKind::Ref(inner) => match &inner.kind {
+                ExprKind::Variable(name) => {
                     let ty = self
                         .lookup(name)
                         .ok_or_else(|| TypeError::new(format!("Undefined variable '{}'", name)))
@@ -1007,8 +1009,8 @@ impl TypeChecker {
                 }
             },
 
-            Expr::StrictRef(inner) => match inner.as_ref() {
-                Expr::Variable(name) => {
+            ExprKind::StrictRef(inner) => match &inner.kind {
+                ExprKind::Variable(name) => {
                     let ty = self
                         .lookup(name)
                         .ok_or_else(|| TypeError::new(format!("Undefined variable '{}'", name)))
@@ -1034,12 +1036,12 @@ impl TypeChecker {
                 }
             },
 
-            Expr::MethodCall {
+            ExprKind::MethodCall {
                 object,
                 method,
                 args,
             } => {
-                if let Expr::Variable(name) = object.as_ref() {
+                if let ExprKind::Variable(name) = &object.kind {
                     // clone to release the borrow on self
                     let exports = self.module_exports.get(name.as_str()).cloned();
                     if let Some(exports) = exports {
@@ -1134,21 +1136,25 @@ impl TypeChecker {
     }
 
     fn transform_stmt(&mut self, stmt: Stmt) -> Stmt {
-        match stmt {
-            Stmt::LetDecl { name, initializer } => {
+        let span = stmt.span.clone();
+        match stmt.kind {
+            StmtKind::LetDecl { name, initializer } => {
                 // Look up the inferred type from the scope
                 let ty = self
                     .lookup(&name)
                     .map(|t| t.to_str().to_string())
                     .unwrap_or_else(|| "Int".to_string());
-                Stmt::VarDecl {
-                    name,
-                    value_type: ty,
-                    initializer,
-                }
+                Stmt::new(
+                    StmtKind::VarDecl {
+                        name,
+                        value_type: ty,
+                        initializer,
+                    },
+                    span.clone(),
+                )
             }
 
-            Stmt::Function {
+            StmtKind::Function {
                 name,
                 params,
                 return_type,
@@ -1162,22 +1168,25 @@ impl TypeChecker {
                 }
                 let body = self.transform(body);
                 self.pop_scope();
-                Stmt::Function {
-                    name,
-                    params,
-                    return_type,
-                    body,
-                }
+                Stmt::new(
+                    StmtKind::Function {
+                        name,
+                        params,
+                        return_type,
+                        body,
+                    },
+                    span.clone(),
+                )
             }
 
-            Stmt::Block(stmts) => {
+            StmtKind::Block(stmts) => {
                 self.push_scope();
                 let stmts = self.transform(stmts);
                 self.pop_scope();
-                Stmt::Block(stmts)
+                Stmt::new(StmtKind::Block(stmts), span.clone())
             }
 
-            Stmt::If {
+            StmtKind::If {
                 condition,
                 then_branch,
                 else_branch,
@@ -1191,22 +1200,25 @@ impl TypeChecker {
                     self.pop_scope();
                     e
                 });
-                Stmt::If {
-                    condition,
-                    then_branch,
-                    else_branch,
-                }
+                Stmt::new(
+                    StmtKind::If {
+                        condition,
+                        then_branch,
+                        else_branch,
+                    },
+                    span.clone(),
+                )
             }
 
-            Stmt::While { condition, body } => {
+            StmtKind::While { condition, body } => {
                 self.push_scope();
                 let body = Box::new(self.transform_stmt(*body));
                 self.pop_scope();
-                Stmt::While { condition, body }
+                Stmt::new(StmtKind::While { condition, body }, span.clone())
             }
 
             // Everything else passes through unchanged
-            other => other,
+            other => Stmt::new(other, span.clone()),
         }
     }
 
@@ -1217,8 +1229,8 @@ impl TypeChecker {
         // collect exports: functions, structs, extends
         let mut exports = HashMap::new();
         for stmt in stmts {
-            match stmt {
-                Stmt::Function {
+            match &stmt.kind {
+                StmtKind::Function {
                     name: fn_name,
                     params,
                     return_type,
@@ -1237,7 +1249,7 @@ impl TypeChecker {
                         },
                     );
                 }
-                Stmt::Struct { name: sname, .. } => {
+                StmtKind::Struct { name: sname, .. } => {
                     exports.insert(sname.clone(), LKitType::Struct(sname.clone()));
                 }
                 _ => {}

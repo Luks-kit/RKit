@@ -92,7 +92,7 @@ impl Parser {
     fn fn_declaration(&mut self) -> Stmt {
         let span = self.current_span();
         self.advance(); // consume 'fn'
-        // Simplified: assuming 'fn type name(...)'
+                        // Simplified: assuming 'fn type name(...)'
         let ret_type = self.parse_type();
         let name = if let TokenType::Identifier(n) = self.consume_ident() {
             n
@@ -475,12 +475,12 @@ impl Parser {
 
         // Prefix rules
         let mut left = match token {
-            TokenType::Literal(v) => Expr::Literal(v),
+            TokenType::Literal(v) => Expr::new(ExprKind::Literal(v), self.current_span()),
             TokenType::Identifier(n) => {
                 if self.check(&TokenType::LBrace) {
                     self.struct_init(n)
                 } else {
-                    Expr::Variable(n)
+                    Expr::new(ExprKind::Variable(n), self.current_span())
                 }
             }
             TokenType::LParen => {
@@ -498,13 +498,13 @@ impl Parser {
                     self.advance();
                 }
                 self.consume(TokenType::RBracket, "Expect ']' after slice literal.");
-                Expr::SliceLiteral(elements)
+                Expr::new(ExprKind::SliceLiteral(elements), self.current_span())
             }
             TokenType::Len => {
                 self.consume(TokenType::LParen, "Expect '(' after 'len'.");
                 let expr = self.expression();
                 self.consume(TokenType::RParen, "Expect ')' after len argument.");
-                Expr::Len(Box::new(expr))
+                Expr::new(ExprKind::Len(Box::new(expr)), self.current_span())
             }
             TokenType::Cast => {
                 self.consume(TokenType::LParen, "Expect '(' after 'cast'.");
@@ -512,35 +512,44 @@ impl Parser {
                 self.consume(TokenType::Comma, "Expect ',' after cast type.");
                 let expr = self.expression();
                 self.consume(TokenType::RParen, "Expect ')' after cast expression.");
-                Expr::Cast {
-                    target_type,
-                    expr: Box::new(expr),
-                }
+                Expr::new(
+                    ExprKind::Cast {
+                        target_type,
+                        expr: Box::new(expr),
+                    },
+                    self.current_span(),
+                )
             }
             TokenType::Amp => {
                 // &strict x or &x
                 if self.check(&TokenType::Strict) {
                     self.advance(); // consume 'strict'
                     let expr = self.parse_precedence(Precedence::Primary);
-                    Expr::StrictRef(Box::new(expr))
+                    Expr::new(ExprKind::StrictRef(Box::new(expr)), self.current_span())
                 } else {
                     let expr = self.parse_precedence(Precedence::Primary);
-                    Expr::Ref(Box::new(expr))
+                    Expr::new(ExprKind::Ref(Box::new(expr)), self.current_span())
                 }
             }
             TokenType::Minus => {
                 let operand = self.parse_precedence(Precedence::Primary);
-                Expr::Unary {
-                    op: TokenType::Minus,
-                    operand: Box::new(operand),
-                }
+                Expr::new(
+                    ExprKind::Unary {
+                        op: TokenType::Minus,
+                        operand: Box::new(operand),
+                    },
+                    self.current_span(),
+                )
             }
             TokenType::Not => {
                 let operand = self.parse_precedence(Precedence::Primary);
-                Expr::Unary {
-                    op: TokenType::Not,
-                    operand: Box::new(operand),
-                }
+                Expr::new(
+                    ExprKind::Unary {
+                        op: TokenType::Not,
+                        operand: Box::new(operand),
+                    },
+                    self.current_span(),
+                )
             }
 
             _ => self.panic_here(&format!("Unexpected token in expression: {:?}", token)),
@@ -582,25 +591,34 @@ impl Parser {
                             }
                         }
                         self.consume(TokenType::RParen, "Expect ')' after arguments.");
-                        Expr::MethodCall {
-                            object: Box::new(left),
-                            method: field,
-                            args,
-                        }
+                        Expr::new(
+                            ExprKind::MethodCall {
+                                object: Box::new(left),
+                                method: field,
+                                args,
+                            },
+                            self.current_span(),
+                        )
                     } else {
-                        Expr::FieldAccess {
-                            object: Box::new(left),
-                            field,
-                        }
+                        Expr::new(
+                            ExprKind::FieldAccess {
+                                object: Box::new(left),
+                                field,
+                            },
+                            self.current_span(),
+                        )
                     }
                 }
                 TokenType::LBracket => {
                     let index = self.expression();
                     self.consume(TokenType::RBracket, "Expect ']' after index.");
-                    Expr::Index {
-                        object: Box::new(left),
-                        index: Box::new(index),
-                    }
+                    Expr::new(
+                        ExprKind::Index {
+                            object: Box::new(left),
+                            index: Box::new(index),
+                        },
+                        self.current_span(),
+                    )
                 }
                 _ => left,
             };
@@ -622,7 +640,10 @@ impl Parser {
                     (n, val)
                 } else {
                     // positional — put the identifier back as an expression
-                    (String::new(), Expr::Variable(n))
+                    (
+                        String::new(),
+                        Expr::new(ExprKind::Variable(n), self.current_span()),
+                    )
                 }
             } else {
                 (String::new(), self.expression())
@@ -634,26 +655,32 @@ impl Parser {
             self.advance();
         }
         self.consume(TokenType::RBrace, "Expect '}' after struct init.");
-        Expr::StructInit { name, fields }
+        Expr::new(ExprKind::StructInit { name, fields }, self.current_span())
     }
 
     fn binary(&mut self, left: Expr, op_tok: TokenType) -> Expr {
         let precedence = self.get_precedence(&op_tok);
         let right = self.parse_precedence(next_precedence(precedence));
 
-        Expr::Binary {
-            left: Box::new(left),
-            op: op_tok,
-            right: Box::new(right),
-        }
+        Expr::new(
+            ExprKind::Binary {
+                left: Box::new(left),
+                op: op_tok,
+                right: Box::new(right),
+            },
+            self.current_span(),
+        )
     }
 
     fn assignment(&mut self, left: Expr) -> Expr {
         let value = self.parse_precedence(Precedence::Assignment);
-        Expr::Assign {
-            target: Box::new(left),
-            value: Box::new(value),
-        }
+        Expr::new(
+            ExprKind::Assign {
+                target: Box::new(left),
+                value: Box::new(value),
+            },
+            self.current_span(),
+        )
     }
 
     fn call(&mut self, callee: Expr) -> Expr {
@@ -669,17 +696,30 @@ impl Parser {
         }
         self.consume(TokenType::RParen, "Expect ')' after arguments.");
 
-        Expr::Call {
-            callee: Box::new(callee),
-            args,
-        }
+        Expr::new(
+            ExprKind::Call {
+                callee: Box::new(callee),
+                args,
+            },
+            self.current_span(),
+        )
     }
 
     // --- Helpers ---
 
     fn panic_here(&self, message: &str) -> ! {
         let span = self.current_span();
-        panic!("{}:{}:{}: {}", span.file, span.line, span.col, message);
+        let mut rendered = format!("{}:{}:{}: {}", span.file, span.line, span.col, message);
+        if let Ok(contents) = std::fs::read_to_string(&span.file) {
+            if let Some(src_line) = contents.lines().nth(span.line.saturating_sub(1)) {
+                rendered.push('\n');
+                rendered.push_str(src_line);
+                rendered.push('\n');
+                rendered.push_str(&" ".repeat(span.col.saturating_sub(1)));
+                rendered.push('^');
+            }
+        }
+        panic!("{}", rendered);
     }
 
     fn get_precedence(&self, token: &TokenType) -> Precedence {

@@ -6,13 +6,13 @@ mod typechecker;
 mod types;
 mod value;
 
-use ast::Stmt;
+use ast::{Stmt, StmtKind};
 use compiler::Compiler;
-use inkwell::OptimizationLevel;
 use inkwell::context::Context;
 use inkwell::targets::{
     CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine,
 };
+use inkwell::OptimizationLevel;
 use lexer::TokenType;
 use lexer::{Lexer, Token};
 use parser::Parser;
@@ -35,6 +35,20 @@ fn lex(source: &str, file: &str) -> Vec<Token> {
 
 use std::env;
 use std::fs;
+
+fn print_span_error(prefix: &str, message: &str, span: &lexer::Span) {
+    eprintln!(
+        "{}:{}:{}: {}{}",
+        span.file, span.line, span.col, prefix, message
+    );
+    if let Ok(contents) = fs::read_to_string(&span.file) {
+        if let Some(line) = contents.lines().nth(span.line.saturating_sub(1)) {
+            eprintln!("{}", line);
+            let caret_pad = " ".repeat(span.col.saturating_sub(1));
+            eprintln!("{}^", caret_pad);
+        }
+    }
+}
 
 fn load_module(name: &str, search_paths: &[&str], loaded: &mut HashSet<String>) -> Vec<Stmt> {
     if loaded.contains(name) {
@@ -92,7 +106,7 @@ fn main() {
     let mut all_modules: HashMap<String, Vec<Stmt>> = HashMap::new();
 
     for stmt in &stmts_unchecked {
-        if let Stmt::Import { module_name } = stmt {
+        if let StmtKind::Import { module_name } = &stmt.kind {
             let module_stmts = load_module(
                 module_name.as_str(),
                 &[".", "/usr/local/lib/lkit"], // search paths
@@ -115,10 +129,7 @@ fn main() {
     if !checker.errors.is_empty() {
         for err in &checker.errors {
             if let Some(span) = &err.span {
-                eprintln!(
-                    "{}:{}:{}: Type error: {}",
-                    span.file, span.line, span.col, err.message
-                );
+                print_span_error("Type error: ", &err.message, span);
             } else {
                 eprintln!("Type error: {}", err.message);
             }
