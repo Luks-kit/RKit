@@ -51,6 +51,7 @@ pub struct TypeChecker {
     pub implementations: HashMap<String, HashSet<String>>, // type -> set of tools it implements
     pub errors: Vec<TypeError>,
     borrow_state: HashMap<String, (usize, bool)>,
+    current_span: Option<Span>,
 }
 
 impl TypeChecker {
@@ -67,6 +68,7 @@ impl TypeChecker {
             implementations: HashMap::new(),
             errors: Vec::new(),
             borrow_state: HashMap::new(),
+            current_span: None,
         }
     }
 
@@ -321,7 +323,20 @@ impl TypeChecker {
             .push(TypeError::with_span(message, expr.span.clone()));
     }
 
+    fn make_error(&self, message: impl Into<String>) -> TypeError {
+        if let Some(span) = &self.current_span {
+            TypeError::with_span(message, span.clone())
+        } else {
+            TypeError::new(message)
+        }
+    }
+
+    fn push_error(&mut self, message: impl Into<String>) {
+        self.errors.push(self.make_error(message));
+    }
+
     fn check_stmt(&mut self, stmt: &Stmt) {
+        let prev_span = self.current_span.replace(stmt.span.clone());
         match &stmt.kind {
             StmtKind::VarDecl {
                 name,
@@ -544,10 +559,7 @@ impl TypeChecker {
             } => {
                 // validate type exists
                 if !self.structs.contains_key(type_name) {
-                    self.errors.push(TypeError::new(format!(
-                        "Cannot extend unknown type '{}'",
-                        type_name
-                    )));
+                    self.push_error(format!("Cannot extend unknown type '{}'", type_name));
                     return;
                 }
 
@@ -583,10 +595,12 @@ impl TypeChecker {
                 }
             }
         }
+        self.current_span = prev_span;
     }
 
     fn check_expr(&mut self, expr: &Expr) -> Option<LKitType> {
-        match &expr.kind {
+        let prev_span = self.current_span.replace(expr.span.clone());
+        let result = match &expr.kind {
             ExprKind::Literal(val) => Some(match val {
                 Value::Int(_) => LKitType::Int,
                 Value::Float(_) => LKitType::Float,
@@ -617,16 +631,16 @@ impl TypeChecker {
                         Some(LKitType::StrictRef(inner)) => *inner.clone(),
                         Some(LKitType::HeapOwner(inner)) => *inner.clone(),
                         Some(LKitType::Ref(_)) => {
-                            self.errors.push(TypeError::new(format!(
+                            self.push_error(format!(
                                 "Cannot assign through shared handle '{}'",
                                 name
-                            )));
+                            ));
                             return None;
                         }
                         Some(t) => t.clone(),
                         None => {
                             self.errors
-                                .push(TypeError::new(format!("Undefined variable '{}'", name)));
+                                .push(self.make_error(format!("Undefined variable '{}'", name)));
                             return None;
                         }
                     },
@@ -637,9 +651,7 @@ impl TypeChecker {
                             LKitType::StrictRef(inner) => *inner,
                             LKitType::HeapOwner(inner) => *inner,
                             LKitType::Ref(_) => {
-                                self.errors.push(TypeError::new(
-                                    "Cannot assign to field through shared handle",
-                                ));
+                                self.push_error("Cannot assign to field through shared handle");
                                 return None;
                             }
                             other => other,
@@ -649,24 +661,25 @@ impl TypeChecker {
                                 Some(def) => match def.field_type(field) {
                                     Some(ty) => ty.clone(),
                                     None => {
-                                        self.errors.push(TypeError::new(format!(
+                                        self.push_error(format!(
                                             "No field '{}' on struct '{}'",
                                             field, name
-                                        )));
+                                        ));
                                         return None;
                                     }
                                 },
                                 None => {
-                                    self.errors
-                                        .push(TypeError::new(format!("Unknown struct '{}'", name)));
+                                    self.errors.push(
+                                        self.make_error(format!("Unknown struct '{}'", name)),
+                                    );
                                     return None;
                                 }
                             },
                             other => {
-                                self.errors.push(TypeError::new(format!(
+                                self.push_error(format!(
                                     "Cannot assign to field on non-struct type {:?}",
                                     other
-                                )));
+                                ));
                                 return None;
                             }
                         }
@@ -674,18 +687,18 @@ impl TypeChecker {
                     ExprKind::Index { object, index: _ } => match self.check_expr(object)? {
                         LKitType::Slice(inner, _) | LKitType::DynSlice(inner) => *inner,
                         other => {
-                            self.errors.push(TypeError::new(format!(
+                            self.push_error(format!(
                                 "Cannot index-assign into non-slice type {:?}",
                                 other
-                            )));
+                            ));
                             return None;
                         }
                     },
                     _ => {
-                        self.errors.push(TypeError::new(format!(
+                        self.push_error(format!(
                             "Invalid assignment target: - {:?} - = {:?}",
                             target, value
-                        )));
+                        ));
                         return None;
                     }
                 };
@@ -696,10 +709,10 @@ impl TypeChecker {
                         if val_ty == LKitType::Int && target_ty == LKitType::Byte {
                             Some(LKitType::Byte)
                         } else {
-                            self.errors.push(TypeError::new(format!(
+                            self.push_error(format!(
                                 "Cannot assign {:?} to {:?}",
                                 val_ty, target_ty
-                            )));
+                            ));
                             None
                         }
                     }
@@ -712,7 +725,7 @@ impl TypeChecker {
                     LKitType::Bool => Some(LKitType::Bool),
                     other => {
                         self.errors
-                            .push(TypeError::new(format!("'!' on non-bool type {:?}", other)));
+                            .push(self.make_error(format!("'!' on non-bool type {:?}", other)));
                         None
                     }
                 },
@@ -721,18 +734,12 @@ impl TypeChecker {
                     LKitType::Int => Some(LKitType::Int),
                     LKitType::Float => Some(LKitType::Float),
                     other => {
-                        self.errors.push(TypeError::new(format!(
-                            "Unary minus on non-numeric type {:?}",
-                            other
-                        )));
+                        self.push_error(format!("Unary minus on non-numeric type {:?}", other));
                         None
                     }
                 },
                 _ => {
-                    self.errors.push(TypeError::new(format!(
-                        "Bad unary application: {:?} {:?}",
-                        op, operand
-                    )));
+                    self.push_error(format!("Bad unary application: {:?} {:?}", op, operand));
                     None
                 }
             },
@@ -758,10 +765,10 @@ impl TypeChecker {
                         LKitType::Float
                     }
                     _ => {
-                        self.errors.push(TypeError::new(format!(
+                        self.push_error(format!(
                             "Binary op {:?} on mismatched types {:?} and {:?}",
                             op, l, r
-                        )));
+                        ));
                         return None;
                     }
                 };
@@ -782,7 +789,7 @@ impl TypeChecker {
                     ExprKind::Variable(n) => n.clone(),
                     _ => {
                         self.errors
-                            .push(TypeError::new("Only direct calls supported"));
+                            .push(self.make_error("Only direct calls supported"));
                         return None;
                     }
                 };
@@ -793,10 +800,10 @@ impl TypeChecker {
                             for (arg, expected) in args.iter().zip(params.iter()) {
                                 match self.check_expr(arg) {
                                     Some(actual) if &actual != expected => {
-                                        self.errors.push(TypeError::new(format!(
+                                        self.push_error(format!(
                                             "Init arg mismatch for '{}': expected {:?}, got {:?}",
                                             name, expected, actual
-                                        )));
+                                        ));
                                     }
                                     _ => {}
                                 }
@@ -804,10 +811,7 @@ impl TypeChecker {
                             return Some(LKitType::Struct(name));
                         }
                         None => {
-                            self.errors.push(TypeError::new(format!(
-                                "Struct '{}' has no init defined",
-                                name
-                            )));
+                            self.push_error(format!("Struct '{}' has no init defined", name));
                             return None;
                         }
                     }
@@ -820,10 +824,10 @@ impl TypeChecker {
                         for (arg, expected) in args.iter().zip(params.iter()) {
                             match self.check_expr(arg) {
                                 Some(actual) if &actual != expected => {
-                                    self.errors.push(TypeError::new(format!(
+                                    self.push_error(format!(
                                         "Argument type mismatch in call to '{}': expected {:?}, got {:?}",
                                         name, expected, actual
-                                    )));
+                                    ));
                                 }
                                 _ => {}
                             }
@@ -832,7 +836,7 @@ impl TypeChecker {
                     }
                     _ => {
                         self.errors
-                            .push(TypeError::new(format!("Undefined function '{}'", name)));
+                            .push(self.make_error(format!("Undefined function '{}'", name)));
                         None
                     }
                 }
@@ -857,24 +861,24 @@ impl TypeChecker {
                         Some(def) => match def.field_type(field) {
                             Some(ty) => Some(ty.clone()),
                             None => {
-                                self.errors.push(TypeError::new(format!(
+                                self.push_error(format!(
                                     "No field '{}' on struct '{}'",
                                     field, name
-                                )));
+                                ));
                                 None
                             }
                         },
                         None => {
                             self.errors
-                                .push(TypeError::new(format!("Unknown struct '{}'", name)));
+                                .push(self.make_error(format!("Unknown struct '{}'", name)));
                             None
                         }
                     },
                     other => {
-                        self.errors.push(TypeError::new(format!(
+                        self.push_error(format!(
                             "Cannot access field '{}' on non-struct type {:?}",
                             field, other
-                        )));
+                        ));
                         None
                     }
                 }
@@ -885,7 +889,7 @@ impl TypeChecker {
                     Some(d) => d,
                     None => {
                         self.errors
-                            .push(TypeError::new(format!("Unknown struct '{}'", name)));
+                            .push(self.make_error(format!("Unknown struct '{}'", name)));
                         return None;
                     }
                 };
@@ -899,7 +903,7 @@ impl TypeChecker {
                     };
                     match (expected, self.check_expr(field_expr)) {
                         (Some(exp), Some(actual)) if exp != actual => {
-                            self.errors.push(TypeError::new(format!(
+                            self.push_error(format!(
                                 "Field '{}' of '{}': expected {:?}, got {:?}",
                                 if field_name.is_empty() {
                                     format!("{}", i)
@@ -909,7 +913,7 @@ impl TypeChecker {
                                 name,
                                 exp,
                                 actual
-                            )));
+                            ));
                         }
                         _ => {}
                     }
@@ -920,17 +924,17 @@ impl TypeChecker {
             ExprKind::SliceLiteral(elements) => {
                 if elements.is_empty() {
                     self.errors
-                        .push(TypeError::new("Cannot infer type of empty slice literal"));
+                        .push(self.make_error("Cannot infer type of empty slice literal"));
                     return None;
                 }
                 let first = self.check_expr(&elements[0])?;
                 for el in &elements[1..] {
                     match self.check_expr(el) {
                         Some(t) if t != first => {
-                            self.errors.push(TypeError::new(format!(
+                            self.push_error(format!(
                                 "Slice literal has mixed types: {:?} and {:?}",
                                 first, t
-                            )));
+                            ));
                             return None;
                         }
                         _ => {}
@@ -942,17 +946,17 @@ impl TypeChecker {
             ExprKind::Index { object, index } => {
                 let idx_ty = self.check_expr(index)?;
                 if idx_ty != LKitType::Int {
-                    self.errors.push(TypeError::new("Slice index must be Int"));
+                    self.push_error("Slice index must be Int");
                     return None;
                 }
 
                 if let ExprKind::Literal(Value::Int(n)) = &index.kind {
                     if let Some(LKitType::Slice(inner, size)) = self.check_expr(object) {
                         if *n < 0 || *n as u64 >= size {
-                            self.errors.push(TypeError::new(format!(
+                            self.push_error(format!(
                                 "Index {} out of bounds for slice of size {}",
                                 n, size
-                            )));
+                            ));
                             return None;
                         }
                         return Some(*inner);
@@ -963,10 +967,7 @@ impl TypeChecker {
                     LKitType::Slice(inner, _) => Some(*inner),
                     LKitType::DynSlice(inner) => Some(*inner),
                     other => {
-                        self.errors.push(TypeError::new(format!(
-                            "Cannot index into non-slice type {:?}",
-                            other
-                        )));
+                        self.push_error(format!("Cannot index into non-slice type {:?}", other));
                         None
                     }
                 }
@@ -975,10 +976,7 @@ impl TypeChecker {
             ExprKind::Len(expr) => match self.check_expr(expr)? {
                 LKitType::Slice(_, _) | LKitType::DynSlice(_) => Some(LKitType::Int),
                 other => {
-                    self.errors.push(TypeError::new(format!(
-                        "len() requires a slice, got {:?}",
-                        other
-                    )));
+                    self.push_error(format!("len() requires a slice, got {:?}", other));
                     None
                 }
             },
@@ -986,7 +984,7 @@ impl TypeChecker {
                 ExprKind::Variable(name) => {
                     let ty = self
                         .lookup(name)
-                        .ok_or_else(|| TypeError::new(format!("Undefined variable '{}'", name)))
+                        .ok_or_else(|| self.make_error(format!("Undefined variable '{}'", name)))
                         .cloned();
                     match ty {
                         Ok(t) => {
@@ -1013,7 +1011,7 @@ impl TypeChecker {
                 ExprKind::Variable(name) => {
                     let ty = self
                         .lookup(name)
-                        .ok_or_else(|| TypeError::new(format!("Undefined variable '{}'", name)))
+                        .ok_or_else(|| self.make_error(format!("Undefined variable '{}'", name)))
                         .cloned();
                     match ty {
                         Ok(t) => {
@@ -1056,10 +1054,10 @@ impl TypeChecker {
                                 for (arg, expected) in args.iter().zip(params.iter()) {
                                     match self.check_expr(arg) {
                                         Some(actual) if &actual != expected => {
-                                            self.errors.push(TypeError::new(format!(
+                                            self.push_error(format!(
                                                 "Arg mismatch in {}.{}: expected {:?} got {:?}",
                                                 name, method, expected, actual
-                                            )));
+                                            ));
                                         }
                                         _ => {}
                                     }
@@ -1067,10 +1065,10 @@ impl TypeChecker {
                                 return Some(*ret);
                             }
                             None => {
-                                self.errors.push(TypeError::new(format!(
+                                self.push_error(format!(
                                     "No function '{}' in module '{}'",
                                     method, name
-                                )));
+                                ));
                                 return None;
                             }
                         }
@@ -1086,30 +1084,24 @@ impl TypeChecker {
                 let type_name = match &base_ty {
                     LKitType::Struct(n) => n.clone(),
                     other => {
-                        self.errors.push(TypeError::new(format!(
+                        self.push_error(format!(
                             "Cannot call method on non-struct type {:?}",
                             other
-                        )));
+                        ));
                         return None;
                     }
                 };
                 let extend_def = match self.extends.get(&type_name) {
                     Some(d) => d.clone(),
                     None => {
-                        self.errors.push(TypeError::new(format!(
-                            "No extend block for type '{}'",
-                            type_name
-                        )));
+                        self.push_error(format!("No extend block for type '{}'", type_name));
                         return None;
                     }
                 };
                 let sig = match extend_def.methods.get(method) {
                     Some(s) => s.clone(),
                     None => {
-                        self.errors.push(TypeError::new(format!(
-                            "No method '{}' on type '{}'",
-                            method, type_name
-                        )));
+                        self.push_error(format!("No method '{}' on type '{}'", method, type_name));
                         return None;
                     }
                 };
@@ -1118,17 +1110,19 @@ impl TypeChecker {
                 for (arg, expected) in args.iter().zip(expected_params.iter()) {
                     match self.check_expr(arg) {
                         Some(actual) if &actual != expected => {
-                            self.errors.push(TypeError::new(format!(
+                            self.push_error(format!(
                             "Argument type mismatch in call to '{}::{}': expected {:?}, got {:?}",
                             type_name, method, expected, actual
-                        )));
+                        ));
                         }
                         _ => {}
                     }
                 }
                 Some(sig.ret.clone())
             }
-        }
+        };
+        self.current_span = prev_span;
+        result
     }
 
     pub fn transform(&mut self, stmts: Vec<Stmt>) -> Vec<Stmt> {
@@ -1265,7 +1259,7 @@ impl TypeChecker {
             .entry(name.to_string())
             .or_insert((0, false));
         if state.1 {
-            Err(TypeError::new(format!(
+            Err(self.make_error(format!(
                 "Cannot create shared handle to '{}' — exclusive handle exists",
                 name
             )))
@@ -1281,12 +1275,12 @@ impl TypeChecker {
             .entry(name.to_string())
             .or_insert((0, false));
         if state.1 {
-            Err(TypeError::new(format!(
+            Err(self.make_error(format!(
                 "Cannot create exclusive handle to '{}' — exclusive handle already exists",
                 name
             )))
         } else if state.0 > 0 {
-            Err(TypeError::new(format!(
+            Err(self.make_error(format!(
                 "Cannot create exclusive handle to '{}' — shared handles exist",
                 name
             )))

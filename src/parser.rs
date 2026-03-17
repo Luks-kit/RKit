@@ -57,7 +57,7 @@ impl Parser {
         let name = if let TokenType::Identifier(n) = self.consume_ident() {
             n
         } else {
-            panic!("Expected module name after 'import'");
+            self.panic_here("Expected module name after 'import'");
         };
         self.consume(TokenType::Semicolon, "Expect ';' after import.");
         Stmt::new(StmtKind::Import { module_name: name }, self.current_span())
@@ -112,7 +112,7 @@ impl Parser {
                 let p_name = if let TokenType::Identifier(n) = self.consume_ident() {
                     n
                 } else {
-                    panic!("Expected parameter name");
+                    self.panic_here("Expected parameter name");
                 };
 
                 params.push((p_name, p_type));
@@ -149,7 +149,7 @@ impl Parser {
         let name = if let TokenType::Identifier(n) = self.consume_ident() {
             n
         } else {
-            panic!("Expected function name");
+            self.panic_here("Expected function name");
         };
 
         self.consume(TokenType::LParen, "Expect '(' after function name.");
@@ -168,7 +168,7 @@ impl Parser {
                 let p_name = if let TokenType::Identifier(n) = self.consume_ident() {
                     n
                 } else {
-                    panic!("Expected parameter name");
+                    self.panic_here("Expected parameter name");
                 };
                 params.push((p_name, p_type));
                 if !self.check(&TokenType::Comma) {
@@ -198,7 +198,7 @@ impl Parser {
         let name = if let TokenType::Identifier(n) = self.consume_ident() {
             n
         } else {
-            panic!("Expected struct name");
+            self.panic_here("Expected struct name");
         };
         self.consume(TokenType::LBrace, "Expect '{' after struct name.");
 
@@ -208,7 +208,7 @@ impl Parser {
             let field_name = if let TokenType::Identifier(n) = self.consume_ident() {
                 n
             } else {
-                panic!("Expected field name");
+                self.panic_here("Expected field name");
             };
             self.consume(TokenType::Semicolon, "Expect ';' after field.");
             fields.push((field_name, field_type));
@@ -223,7 +223,7 @@ impl Parser {
         let name = if let TokenType::Identifier(n) = self.consume_ident() {
             n
         } else {
-            panic!("Expected tool name");
+            self.panic_here("Expected tool name");
         };
         self.consume(TokenType::LBrace, "Expect '{' after tool name.");
 
@@ -234,7 +234,7 @@ impl Parser {
             let method_name = if let TokenType::Identifier(n) = self.consume_ident() {
                 n
             } else {
-                panic!("Expected method name in tool");
+                self.panic_here("Expected method name in tool");
             };
             self.consume(TokenType::LParen, "Expect '(' after method name.");
             let mut params = Vec::new();
@@ -244,7 +244,7 @@ impl Parser {
                     let p_name = if let TokenType::Identifier(n) = self.consume_ident() {
                         n
                     } else {
-                        panic!("Expected param name");
+                        self.panic_here("Expected param name");
                     };
                     params.push((p_name, p_type));
                     if !self.check(&TokenType::Comma) {
@@ -274,7 +274,7 @@ impl Parser {
         let type_name = if let TokenType::Identifier(n) = self.consume_ident() {
             n
         } else {
-            panic!("Expected type name after 'extend'");
+            self.panic_here("Expected type name after 'extend'");
         };
 
         if self.check(&TokenType::With) {
@@ -282,7 +282,7 @@ impl Parser {
             let tool_name = if let TokenType::Identifier(n) = self.consume_ident() {
                 n
             } else {
-                panic!("Expected tool name after 'with'");
+                self.panic_here("Expected tool name after 'with'");
             };
             self.consume(TokenType::LBrace, "Expect '{' after tool name.");
             let mut items = Vec::new();
@@ -330,7 +330,7 @@ impl Parser {
                 let p_name = if let TokenType::Identifier(n) = self.consume_ident() {
                     n
                 } else {
-                    panic!("Expected parameter name");
+                    self.panic_here("Expected parameter name");
                 };
                 params.push((p_name, p_type));
                 if !self.check(&TokenType::Comma) {
@@ -358,7 +358,7 @@ impl Parser {
         let name = if let TokenType::Identifier(n) = self.consume_ident() {
             n
         } else {
-            panic!("Expected method name");
+            self.panic_here("Expected method name");
         };
         self.consume(TokenType::LParen, "Expect '(' after method name.");
         let mut params = Vec::new();
@@ -368,7 +368,7 @@ impl Parser {
                 let p_name = if let TokenType::Identifier(n) = self.consume_ident() {
                     n
                 } else {
-                    panic!("Expected parameter name");
+                    self.panic_here("Expected parameter name");
                 };
                 params.push((p_name, p_type));
                 if !self.check(&TokenType::Comma) {
@@ -575,7 +575,7 @@ impl Parser {
                     let field = if let TokenType::Identifier(n) = self.consume_ident() {
                         n
                     } else {
-                        panic!("Expected field name after '.'");
+                        self.panic_here("Expected field name after '.'");
                     };
                     // method call or field access?
                     if self.check(&TokenType::LParen) {
